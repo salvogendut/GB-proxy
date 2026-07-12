@@ -151,7 +151,7 @@ def _replace_inline_svgs(soup, short_image_urls):
 		svg_tag.replace_with(soup.new_tag("img", **image_attrs))
 
 
-def _rewrite_images(soup, base_url):
+def _rewrite_images(soup, base_url, max_alt_length=None):
 	extension = image_extension(config.CONVERT_IMAGES, config.CONVERT_IMAGES_TO_FILETYPE)
 	for image_tag in list(soup.find_all("img")):
 		if image_tag.attrs.pop("data-proxy-cached", None):
@@ -184,6 +184,8 @@ def _rewrite_images(soup, base_url):
 		image_tag["src"] = _proxy_url("serve_short_image", token=token, extension=extension)
 		for attribute in ("data-src", "data-original", "loading", "srcset"):
 			image_tag.attrs.pop(attribute, None)
+		if max_alt_length is not None and image_tag.get("alt"):
+			image_tag["alt"] = str(image_tag["alt"])[:max_alt_length]
 
 
 def _rewrite_navigation(soup, base_url):
@@ -254,7 +256,8 @@ def transcode_html(document, url=None, whitelisted_domains=None, simplify_html=F
 				  tags_to_unwrap=None, tags_to_strip=None, attributes_to_strip=None,
 				  convert_characters=False, conversion_table=None,
 				  allowed_tags=None, allowed_attributes=None,
-				  shorten_link_urls=False, short_image_urls=False, ascii_only=False):
+				  shorten_link_urls=False, short_image_urls=False, ascii_only=False,
+				  max_image_alt_length=None):
 	"""Convert an HTML response for the configured legacy client."""
 	if isinstance(document, bytes):
 		document = document.decode("utf-8", errors="replace")
@@ -282,7 +285,7 @@ def transcode_html(document, url=None, whitelisted_domains=None, simplify_html=F
 
 	_replace_inline_svgs(soup, short_image_urls)
 	if short_image_urls:
-		_rewrite_images(soup, base_url)
+		_rewrite_images(soup, base_url, max_image_alt_length)
 	if shorten_link_urls:
 		_rewrite_navigation(soup, base_url)
 	else:

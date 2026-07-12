@@ -283,6 +283,7 @@ def process_response(response, url):
 			shorten_link_urls=getattr(config, "SHORTEN_LINK_URLS", False),
 			short_image_urls=getattr(config, "SHORT_IMAGE_URLS", False),
 			ascii_only=getattr(config, "ASCII_ONLY", False),
+			max_image_alt_length=getattr(config, "MAX_IMAGE_ALT_LENGTH", None),
 		)
 	else:
 		print(f"Content type {content_type} should not be transcoded, passing through unchanged")

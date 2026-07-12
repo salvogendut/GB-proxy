@@ -29,6 +29,7 @@ The preset:
 
 - reduces pages to GEOBENCH's small HTML subset while retaining links and GET/POST forms;
 - rewrites links and images to short proxy-local tokens;
+- bounds image alternative text so each complete `<img>` tag fits Browser.APP's parser;
 - downloads images lazily, only when their short URL is requested;
 - resizes images to at most 160x96 pixels;
 - returns canonical four-colour GBPC v2 Mode-1 `.PIC` data that CPC, MSX2, and PCW can translate locally;

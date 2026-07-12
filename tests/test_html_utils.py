@@ -38,6 +38,7 @@ class GeobenchHtmlTests(unittest.TestCase):
 				shorten_link_urls=True,
 				short_image_urls=True,
 				ascii_only=True,
+				max_image_alt_length=preset.MAX_IMAGE_ALT_LENGTH,
 			)
 
 	def test_long_resources_become_short_urls_and_forms_survive(self):
@@ -91,6 +92,16 @@ class GeobenchHtmlTests(unittest.TestCase):
 
 		self.assertTrue(resource.target.startswith("inline-svg:"))
 		self.assertIn(b"<svg", resource.content)
+
+	def test_image_alt_is_bounded_for_the_client_tag_buffer(self):
+		alt = "a pixelated cartoon graphic of a frog awaiting your search query"
+		output = self.transcode(
+			f'<img src="https://example.com/frog.gif" alt="{alt}">'
+		).decode("ascii")
+		soup = BeautifulSoup(output, "html.parser")
+
+		self.assertEqual(soup.img["alt"], alt[:preset.MAX_IMAGE_ALT_LENGTH])
+		self.assertLessEqual(len(str(soup.img)), 111)
 
 
 if __name__ == "__main__":

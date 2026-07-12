@@ -111,6 +111,8 @@ ALLOWED_HTML_ATTRIBUTES = {
 
 SHORTEN_LINK_URLS = True
 SHORT_IMAGE_URLS = True
+# BROWSER.APP retains 23 characters of image alt text in its bounded tag parser.
+MAX_IMAGE_ALT_LENGTH = 23
 ASCII_ONLY = True
 MINIMAL_RESPONSE_HEADERS = True
 
