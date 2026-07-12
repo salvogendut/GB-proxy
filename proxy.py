@@ -7,19 +7,26 @@ from urllib.parse import urlparse
 
 # Third-party imports
 import requests
-from flask import Flask, request, session, g, abort, Response, send_from_directory
+from flask import Flask, request, g, abort, Response, send_from_directory
 from werkzeug.serving import get_interface_ip
 from werkzeug.wrappers.response import Response as WerkzeugResponse
 
 # First-party imports
 from utils.html_utils import transcode_html, transcode_content
-from utils.image_utils import is_image_url, fetch_and_cache_image, CACHE_DIR
+from utils.image_utils import (
+	CACHE_DIR,
+	fetch_and_cache_image,
+	image_extension,
+	image_mimetype,
+	is_image_url,
+)
+from utils.resource_registry import clear_resources, resolve_resource
 from utils.system_utils import load_preset
 
 
 os.environ['FLASK_ENV'] = 'development'
 app = Flask(__name__)
-session = requests.Session()
+http_session = requests.Session()
 
 HTTP_ERRORS = (403, 404, 500, 503, 504)
 ERROR_HEADER = "[[Macproxy Encountered an Error]]"
@@ -35,6 +42,7 @@ def clear_image_cache():
 	if os.path.exists(CACHE_DIR):
 		shutil.rmtree(CACHE_DIR)
 	os.makedirs(CACHE_DIR, exist_ok=True)
+	clear_resources()
 
 clear_image_cache()
 
@@ -56,23 +64,66 @@ for ext in ENABLED_EXTENSIONS:
 
 @app.route("/cached_image/<path:filename>")
 def serve_cached_image(filename):
-	return send_from_directory(CACHE_DIR, filename, mimetype='image/gif')
+	return send_image_file(filename)
 
-def handle_image_request(url):
-	# Pass config values to fetch_and_cache_image
-	cached_url = fetch_and_cache_image(
+
+def cache_image(url, content=None):
+	return fetch_and_cache_image(
 		url,
+		content,
 		resize=config.RESIZE_IMAGES,
 		max_width=config.MAX_IMAGE_WIDTH,
 		max_height=config.MAX_IMAGE_HEIGHT,
 		convert=config.CONVERT_IMAGES,
 		convert_to=config.CONVERT_IMAGES_TO_FILETYPE,
-		dithering=config.DITHERING_ALGORITHM
+		dithering=config.DITHERING_ALGORITHM,
 	)
+
+
+def send_image_file(filename):
+	if filename != os.path.basename(filename):
+		return abort(404, "Image not found")
+	if not getattr(config, "MINIMAL_RESPONSE_HEADERS", False):
+		return send_from_directory(CACHE_DIR, filename, mimetype=image_mimetype(filename))
+	path = os.path.join(CACHE_DIR, filename)
+	try:
+		with open(path, "rb") as image_file:
+			content = image_file.read()
+	except OSError:
+		return abort(404, "Image not found")
+	return Response(content, status=200, mimetype=image_mimetype(filename))
+
+
+def send_cached_image(cached_url):
+	return send_image_file(os.path.basename(cached_url))
+
+def handle_image_request(url):
+	cached_url = cache_image(url)
 	if cached_url:
-		return send_from_directory(CACHE_DIR, os.path.basename(cached_url), mimetype='image/gif')
-	else:
-		return abort(404, "Image not found or could not be processed")
+		return send_cached_image(cached_url)
+	return abort(404, "Image not found or could not be processed")
+
+
+@app.route("/i/<token>.<extension>")
+def serve_short_image(token, extension):
+	expected_extension = image_extension(config.CONVERT_IMAGES, config.CONVERT_IMAGES_TO_FILETYPE)
+	if extension.lower() != expected_extension:
+		return abort(404, "Unknown converted image format")
+	resource = resolve_resource("image", token)
+	if resource is None:
+		return abort(404, "Image token has expired")
+	cached_url = cache_image(resource.target, resource.content)
+	if not cached_url:
+		return abort(404, "Image could not be processed")
+	return send_cached_image(cached_url)
+
+
+@app.route("/u/<token>", methods=["GET", "POST"])
+def follow_short_url(token):
+	resource = resolve_resource("url", token)
+	if resource is None:
+		return abort(404, "Link token has expired")
+	return handle_target_request(resource.target, append_query=True)
 
 @app.route("/", defaults={"path": "/"}, methods=["GET", "POST"])
 @app.route("/<path:path>", methods=["GET", "POST"])
@@ -159,25 +210,17 @@ def process_response(response, url):
 		status_code = 200
 		headers = {}
 
-	content_type = headers.get('Content-Type', '').lower()
+	content_type = next(
+		(value for key, value in headers.items() if key.lower() == "content-type"),
+		"",
+	).lower()
 	print(f"Content-Type: {content_type}")
 
 	if content_type.startswith('image/'):
-		# For image content, use the fetch_and_cache_image function with config values
-		cached_url = fetch_and_cache_image(
-			url,
-			content,
-			resize=config.RESIZE_IMAGES,
-			max_width=config.MAX_IMAGE_WIDTH,
-			max_height=config.MAX_IMAGE_HEIGHT,
-			convert=config.CONVERT_IMAGES,
-			convert_to=config.CONVERT_IMAGES_TO_FILETYPE,
-			dithering=config.DITHERING_ALGORITHM
-		)
+		cached_url = cache_image(url, content)
 		if cached_url:
-			return send_from_directory(CACHE_DIR, os.path.basename(cached_url), mimetype='image/gif')
-		else:
-			return abort(404, "Image could not be processed")
+			return send_cached_image(cached_url)
+		return abort(404, "Image could not be processed")
 
 	# Handle CSS and JavaScript
 	if content_type in ['text/css', 'text/javascript', 'application/javascript', 'application/x-javascript']:
@@ -234,31 +277,58 @@ def process_response(response, url):
 			tags_to_strip=config.TAGS_TO_STRIP,
 			attributes_to_strip=config.ATTRIBUTES_TO_STRIP,
 			convert_characters=config.CONVERT_CHARACTERS,
-			conversion_table=config.CONVERSION_TABLE
+			conversion_table=config.CONVERSION_TABLE,
+			allowed_tags=getattr(config, "ALLOWED_HTML_TAGS", None),
+			allowed_attributes=getattr(config, "ALLOWED_HTML_ATTRIBUTES", None),
+			shorten_link_urls=getattr(config, "SHORTEN_LINK_URLS", False),
+			short_image_urls=getattr(config, "SHORT_IMAGE_URLS", False),
+			ascii_only=getattr(config, "ASCII_ONLY", False),
 		)
 	else:
 		print(f"Content type {content_type} should not be transcoded, passing through unchanged")
 
 	response = Response(content, status_code)
+	ignored_headers = {
+		"connection",
+		"content-encoding",
+		"content-length",
+		"date",
+		"keep-alive",
+		"proxy-authenticate",
+		"proxy-authorization",
+		"server",
+		"te",
+		"trailer",
+		"transfer-encoding",
+		"upgrade",
+	}
+	minimal_headers = {"content-disposition", "content-type"}
 	for key, value in headers.items():
-		if key.lower() not in ["content-encoding", "content-length", "transfer-encoding"]:
-			response.headers[key] = value
+		lower_key = key.lower()
+		if lower_key in ignored_headers:
+			continue
+		if getattr(config, "MINIMAL_RESPONSE_HEADERS", False) and lower_key not in minimal_headers:
+			continue
+		response.headers[key] = value
 
 	print("Finished processing response")
 	return response
 
 def handle_default_request():
 	url = request.url.replace("https://", "http://", 1)
+	return handle_target_request(url, append_query=False)
+
+
+def handle_target_request(url, append_query=False):
 	headers = prepare_headers()
-	
 	print(f"Handling default request for URL: {url}")
-	
+
 	try:
-		resp = send_request(url, headers)
+		resp = send_request(url, headers, append_query=append_query)
 		content = resp.content
 		status_code = resp.status_code
 		headers = dict(resp.headers)
-		return process_response((content, status_code, headers), url)
+		return process_response((content, status_code, headers), resp.url)
 	except requests.exceptions.ConnectionError as e:
 		error_args = str(e.args)
 		if any(keyword in error_args for keyword in ["NameResolutionError", "nodename nor servname provided", "Failed to resolve"]):
@@ -280,12 +350,12 @@ def prepare_headers():
 	}
 	return headers
 
-def send_request(url, headers):
+def send_request(url, headers, append_query=False):
 	print(f"Sending request to: {url}")
 	if request.method == "POST":
-		return session.post(url, data=request.form, headers=headers, allow_redirects=True)
-	else:
-		return session.get(url, params=request.args, headers=headers)
+		return http_session.post(url, data=request.form, headers=headers, allow_redirects=True)
+	params = request.args if append_query else None
+	return http_session.get(url, params=params, headers=headers, allow_redirects=True)
 
 @app.after_request
 def apply_caching(resp):

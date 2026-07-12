@@ -1,7 +1,48 @@
-## MacProxy Plus
-An extensible HTTP proxy that connects early computers to the Internet.
+# GB-proxy
+An extensible HTTP proxy that connects GEOBENCH and other early computers to the Internet.
 
-This fork of <a href="https://github.com/rdmark/macproxy">MacProxy</a> adds support for ```extensions```, which intercept requests for specific domains to serve simplified HTML interfaces, making it possible to browse the modern web from vintage hardware. Though originally designed for compatibility with early Macintoshes, MacProxy Plus should work to get many other vintage machines online.
+GB-proxy is a downstream fork of [MacProxy Plus](https://github.com/hunterirving/macproxy_plus), itself based on [MacProxy](https://github.com/rdmark/macproxy). It retains MacProxy Plus's extensions and legacy-browser presets while adding a GEOBENCH profile and portable GBPC v2 image output.
+
+### GEOBENCH Setup
+
+Create the local configuration:
+
+```shell
+cp config.py.example config.py
+```
+
+Then enable the GEOBENCH preset in `config.py`:
+
+```python
+PRESET = "geobench"
+```
+
+Start the proxy on the host machine:
+
+```shell
+./start_macproxy.sh --port=5001
+```
+
+In `BROWSER.APP`, open **Settings**, choose **Proxy**, and enter the host's LAN address, for example `http://192.168.1.10:5001`. The same value can be stored directly as `PROXY=` in `GEOBENCH.CFG`.
+
+The preset:
+
+- reduces pages to GEOBENCH's small HTML subset while retaining links and GET/POST forms;
+- rewrites links and images to short proxy-local tokens;
+- downloads images lazily, only when their short URL is requested;
+- resizes images to at most 160x96 pixels;
+- returns canonical four-colour GBPC v2 Mode-1 `.PIC` data that CPC, MSX2, and PCW can translate locally;
+- transliterates displayed text to printable 7-bit ASCII.
+
+Current GEOBENCH releases can use the simplified pages and short links immediately. Inline images also require the corresponding lazy `<img>` support in `BROWSER.APP`.
+
+The client-to-proxy connection is intentionally plain HTTP. Run GB-proxy on a trusted LAN and do not use it for passwords or other sensitive traffic.
+
+Run the regression tests with:
+
+```shell
+venv/bin/python -m unittest discover -s tests -v
+```
 
 ### Demonstration Video (on YouTube)
 

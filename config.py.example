@@ -43,6 +43,7 @@ WHITELISTED_DOMAINS = [
 # settings that follow below.
 # The default values target compatability with the MacWeb 2.0 browser.
 #PRESET = "wii_internet_channel"
+#PRESET = "geobench"
 
 # --------------------------------------------------------------------------------------
 # *** One or more of the following settings may be overridden if you enable a preset ***
@@ -77,6 +78,25 @@ ATTRIBUTES_TO_STRIP = [
 	"link",
 	"vlink"
 ]
+
+# Optional allowlists for very constrained clients. When ALLOWED_HTML_TAGS is
+# not None, unknown tags are unwrapped after dangerous tags have been removed.
+# ALLOWED_HTML_ATTRIBUTES maps tag names (and optionally "*") to attributes
+# that may remain in the output.
+ALLOWED_HTML_TAGS = None
+ALLOWED_HTML_ATTRIBUTES = None
+
+# Rewrite links and images to compact URLs hosted by this proxy. This is useful
+# for clients with small URL buffers and also makes image conversion lazy.
+SHORTEN_LINK_URLS = False
+SHORT_IMAGE_URLS = False
+
+# Transliterate remaining page text to printable 7-bit ASCII.
+ASCII_ONLY = False
+
+# Return only essential upstream response headers. Flask still supplies the
+# HTTP status, Date, Server, Content-Length, and Connection fields.
+MINIMAL_RESPONSE_HEADERS = False
 
 # Process images for optimal rendering on your device/browser:
 CAN_RENDER_INLINE_IMAGES = False # Mostly used to conditionally enable landing page images (ex: waybackmachine.py)

@@ -1,207 +1,303 @@
-# Standard library imports
+"""HTML transformations for legacy and constrained proxy clients."""
+
+import base64
+import binascii
 import copy
 import hashlib
-import html
+import html as html_module
 import re
+import unicodedata
+from urllib.parse import unquote_to_bytes, urljoin, urlparse
 
-# Third-party imports
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment, Doctype
 from bs4.formatter import HTMLFormatter
 from flask import current_app, url_for
 
-# First-party imports
-from utils.image_utils import fetch_and_cache_image
+from utils.image_utils import fetch_and_cache_image, image_extension
+from utils.resource_registry import register_resource
 from utils.system_utils import load_preset
 
-# Get config
+
 config = load_preset()
 
 
 class URLAwareHTMLFormatter(HTMLFormatter):
-	def __init__(self, *args, **kwargs):
-		super().__init__(*args, **kwargs)
-
 	def escape(self, string):
-		"""
-		Escape special characters in the given string or list of strings.
-		"""
 		if isinstance(string, list):
-			return [html.escape(str(item), quote=True) for item in string]
-		elif string is None:
-			return ''
-		else:
-			return html.escape(str(string), quote=True)
+			return [html_module.escape(str(item), quote=True) for item in string]
+		if string is None:
+			return ""
+		return html_module.escape(str(string), quote=True)
 
 	def attributes(self, tag):
-		for key, val in tag.attrs.items():
-			if key in ['href', 'src']:  # Don't escape URL attributes
-				yield key, val
+		for key, value in tag.attrs.items():
+			if key in ("href", "src"):
+				yield key, value
 			else:
-				yield key, self.escape(val)
+				yield key, self.escape(value)
+
 
 def transcode_content(content):
-	"""
-	Convert HTTPS to HTTP in CSS or JavaScript content
-	"""
+	"""Convert HTTPS references in CSS or JavaScript content to HTTP."""
 	if isinstance(content, bytes):
-		content = content.decode('utf-8', errors='replace')
-		
-	# Simple pattern to match URLs in both CSS and JS
+		content = content.decode("utf-8", errors="replace")
+
 	patterns = [
-		(r"""url\(['"]?(https://[^)'"]+)['"]?\)""", r"url(\1)"),  # CSS url()
-		(r'"https://', '"http://'),  # Double-quoted URLs
-		(r"'https://", "'http://"),  # Single-quoted URLs
-		(r"https://", "http://"),    # Unquoted URLs
+		(r"""url\(['"]?(https://[^)'"]+)['"]?\)""", r"url(\1)"),
+		(r'"https://', '"http://'),
+		(r"'https://", "'http://"),
+		(r"https://", "http://"),
 	]
-	
 	for pattern, replacement in patterns:
-		content = re.sub(pattern, 
-						lambda m: replacement.replace(r"\1", 
-						m.group(1).replace("https://", "http://") if len(m.groups()) > 0 else ""),
-						content)
-	
-	return content.encode('utf-8')
+		content = re.sub(
+			pattern,
+			lambda match: replacement.replace(
+				r"\1",
+				match.group(1).replace("https://", "http://") if match.groups() else "",
+			),
+			content,
+		)
+	return content.encode("utf-8")
 
-def transcode_html(html, url=None, whitelisted_domains=None, simplify_html=False, 
+
+def _proxy_url(endpoint, **values):
+	path = url_for(endpoint, **values)
+	return f"http://{current_app.config['MACPROXY_HOST_AND_PORT']}{path}"
+
+
+def _absolute_web_url(base_url, value):
+	if not value:
+		return None
+	value = value.strip()
+	if value.startswith("//"):
+		scheme = urlparse(base_url).scheme or "https"
+		value = f"{scheme}:{value}"
+	absolute = urljoin(base_url, value)
+	if urlparse(absolute).scheme.lower() not in ("http", "https"):
+		return None
+	return absolute
+
+
+def _decode_data_uri(source):
+	try:
+		header, payload = source.split(",", 1)
+		if ";base64" in header.lower():
+			return base64.b64decode(payload, validate=True)
+		return unquote_to_bytes(payload)
+	except (ValueError, binascii.Error):
+		return None
+
+
+def _ascii_text(value):
+	return unicodedata.normalize("NFKD", value).encode("ascii", errors="ignore").decode("ascii")
+
+
+def _replace_inline_svgs(soup, short_image_urls):
+	for use_tag in list(soup.find_all("use")):
+		attribute = None
+		if "href" in use_tag.attrs:
+			attribute = "href"
+		elif "xlink:href" in use_tag.attrs:
+			attribute = "xlink:href"
+		if not attribute or not str(use_tag[attribute]).startswith("#"):
+			continue
+		symbol_tag = soup.find("symbol", {"id": str(use_tag[attribute])[1:]})
+		if symbol_tag is None:
+			continue
+		if "viewBox" in symbol_tag.attrs and use_tag.parent.name == "svg" and "viewBox" not in use_tag.parent.attrs:
+			use_tag.parent["viewBox"] = symbol_tag["viewBox"]
+		symbol_copy = copy.copy(symbol_tag)
+		use_tag.replace_with(symbol_copy)
+		symbol_copy.unwrap()
+
+	for svg_tag in list(soup.find_all("svg")):
+		svg_attrs = dict(svg_tag.attrs)
+		view_box = svg_attrs.get("viewBox") or svg_attrs.get("viewbox")
+		if view_box:
+			parts = str(view_box).replace(",", " ").split()
+			if len(parts) == 4:
+				svg_attrs.setdefault("width", parts[2])
+				svg_attrs.setdefault("height", parts[3])
+
+		svg_data = str(svg_tag).encode("utf-8")
+		fake_url = "inline-svg:" + hashlib.sha256(svg_data).hexdigest()
+		extension = image_extension(config.CONVERT_IMAGES, config.CONVERT_IMAGES_TO_FILETYPE, fake_url)
+		if short_image_urls:
+			token = register_resource("image", fake_url, svg_data)
+			source = _proxy_url("serve_short_image", token=token, extension=extension)
+		else:
+			cached_url = fetch_and_cache_image(
+				fake_url,
+				svg_data,
+				resize=config.RESIZE_IMAGES,
+				max_width=config.MAX_IMAGE_WIDTH,
+				max_height=config.MAX_IMAGE_HEIGHT,
+				convert=config.CONVERT_IMAGES,
+				convert_to=config.CONVERT_IMAGES_TO_FILETYPE,
+				dithering=config.DITHERING_ALGORITHM,
+				hash_url=False,
+			)
+			if not cached_url:
+				svg_tag.decompose()
+				continue
+			source = f"http://{current_app.config['MACPROXY_HOST_AND_PORT']}{cached_url}"
+
+		image_attrs = {"src": source, "data-proxy-cached": "1"}
+		for dimension in ("width", "height"):
+			if dimension in svg_attrs:
+				image_attrs[dimension] = svg_attrs[dimension]
+		if "aria-label" in svg_attrs:
+			image_attrs["alt"] = svg_attrs["aria-label"]
+		svg_tag.replace_with(soup.new_tag("img", **image_attrs))
+
+
+def _rewrite_images(soup, base_url):
+	extension = image_extension(config.CONVERT_IMAGES, config.CONVERT_IMAGES_TO_FILETYPE)
+	for image_tag in list(soup.find_all("img")):
+		if image_tag.attrs.pop("data-proxy-cached", None):
+			continue
+
+		source = image_tag.get("data-src") or image_tag.get("data-original") or image_tag.get("src")
+		if not source and image_tag.get("srcset"):
+			source = str(image_tag["srcset"]).split(",", 1)[0].strip().split(" ", 1)[0]
+		if not source:
+			if image_tag.get("alt"):
+				image_tag.replace_with(image_tag["alt"])
+			else:
+				image_tag.decompose()
+			continue
+
+		content = None
+		if str(source).startswith("data:"):
+			content = _decode_data_uri(str(source))
+			if content is None:
+				image_tag.decompose()
+				continue
+			target = "inline-image:" + hashlib.sha256(content).hexdigest()
+		else:
+			target = _absolute_web_url(base_url, str(source))
+			if target is None:
+				image_tag.decompose()
+				continue
+
+		token = register_resource("image", target, content)
+		image_tag["src"] = _proxy_url("serve_short_image", token=token, extension=extension)
+		for attribute in ("data-src", "data-original", "loading", "srcset"):
+			image_tag.attrs.pop(attribute, None)
+
+
+def _rewrite_navigation(soup, base_url):
+	for link_tag in soup.find_all("a"):
+		href = link_tag.get("href")
+		if not href or str(href).startswith("#"):
+			continue
+		target = _absolute_web_url(base_url, str(href))
+		if target is None:
+			link_tag.attrs.pop("href", None)
+			continue
+		token = register_resource("url", target)
+		link_tag["href"] = _proxy_url("follow_short_url", token=token)
+
+	for form_tag in soup.find_all("form"):
+		action = form_tag.get("action") or base_url
+		target = _absolute_web_url(base_url, str(action))
+		if target is None:
+			form_tag.attrs.pop("action", None)
+			continue
+		token = register_resource("url", target)
+		form_tag["action"] = _proxy_url("follow_short_url", token=token)
+		method = str(form_tag.get("method", "get")).lower()
+		form_tag["method"] = method if method in ("get", "post") else "get"
+
+
+def _downgrade_urls(soup):
+	for tag in soup.find_all(("link", "script", "img", "a", "iframe", "form")):
+		for attribute in ("src", "href", "action"):
+			value = tag.get(attribute)
+			if not value:
+				continue
+			if str(value).startswith("https://"):
+				tag[attribute] = "http://" + str(value)[8:]
+			elif str(value).startswith("//"):
+				tag[attribute] = "http:" + str(value)
+
+
+def _apply_allowlists(soup, allowed_tags, allowed_attributes):
+	if allowed_tags is not None:
+		allowed = set(allowed_tags)
+		for tag in list(soup.find_all(True)):
+			if tag.name not in allowed and tag.parent is not None:
+				tag.unwrap()
+
+	if allowed_attributes is not None:
+		global_attributes = set(allowed_attributes.get("*", ()))
+		for tag in soup.find_all(True):
+			allowed = global_attributes | set(allowed_attributes.get(tag.name, ()))
+			for attribute in list(tag.attrs):
+				if attribute not in allowed:
+					del tag[attribute]
+
+
+def _transliterate_document(soup):
+	for text_node in list(soup.find_all(string=True)):
+		if isinstance(text_node, (Comment, Doctype)):
+			text_node.extract()
+			continue
+		text_node.replace_with(_ascii_text(str(text_node)))
+	for tag in soup.find_all(True):
+		for attribute in ("alt", "placeholder", "title", "value"):
+			if attribute in tag.attrs:
+				tag[attribute] = _ascii_text(str(tag[attribute]))
+
+
+def transcode_html(document, url=None, whitelisted_domains=None, simplify_html=False,
 				  tags_to_unwrap=None, tags_to_strip=None, attributes_to_strip=None,
-				  convert_characters=False, conversion_table=None):
-	"""
-	Uses BeautifulSoup to transcode payloads of the text/html content type
-	"""
+				  convert_characters=False, conversion_table=None,
+				  allowed_tags=None, allowed_attributes=None,
+				  shorten_link_urls=False, short_image_urls=False, ascii_only=False):
+	"""Convert an HTML response for the configured legacy client."""
+	if isinstance(document, bytes):
+		document = document.decode("utf-8", errors="replace")
 
-	if isinstance(html, bytes):
-		html = html.decode("utf-8", errors="replace")
-
-	# Handle character conversion regardless of whitelist status
 	if convert_characters:
-		for key, replacement in conversion_table.items():
+		for key, replacement in (conversion_table or {}).items():
 			if isinstance(replacement, bytes):
 				replacement = replacement.decode("utf-8")
-			html = html.replace(key, replacement)
+			document = document.replace(key, replacement)
 
-	# The html5lib parser is required in order to preserve case-sensitivity of
-	# tags. Using html.parser will corrupt SVGs and possibly other XML tags.
-	soup = BeautifulSoup(html, "html5lib")
+	base_url = url or "http://localhost/"
+	soup = BeautifulSoup(document, "html5lib")
+	domain = urlparse(base_url).netloc
+	is_whitelisted = any(domain.endswith(item) for item in (whitelisted_domains or ()))
 
-	# Contents of <pre> tags should always use HTML entities
-	for tag in soup.find_all(['pre']):
-		tag.replace_with(str(tag))
-
-	# Always convert HTTPS to HTTP regardless of whitelist status
-	for tag in soup(['link', 'script', 'img', 'a', 'iframe']):
-		# Handle src attributes
-		if 'src' in tag.attrs:
-			if tag['src'].startswith('https://'):
-				tag['src'] = tag['src'].replace('https://', 'http://')
-			elif tag['src'].startswith('//'):  # Handle protocol-relative URLs
-				tag['src'] = 'http:' + tag['src']
-
-		# Handle href attributes
-		if 'href' in tag.attrs:
-			if tag['href'].startswith('https://'):
-				tag['href'] = tag['href'].replace('https://', 'http://')
-			elif tag['href'].startswith('//'):  # Handle protocol-relative URLs
-				tag['href'] = 'http:' + tag['href']
-
-	# Check if domain is whitelisted
-	is_whitelisted = False
-	if url:
-		from urllib.parse import urlparse
-		domain = urlparse(url).netloc
-		is_whitelisted = any(domain.endswith(whitelisted) for whitelisted in whitelisted_domains)
-
-	# Only perform tag/attribute stripping if the domain is not whitelisted and SIMPLIFY_HTML is True
 	if simplify_html and not is_whitelisted:
-		for tag in soup(tags_to_unwrap):
-			tag.unwrap()
-		for tag in soup(tags_to_strip):
+		for tag in list(soup.find_all(tags_to_unwrap or ())):
+			if tag.parent is not None:
+				tag.unwrap()
+		for tag in list(soup.find_all(tags_to_strip or ())):
 			tag.decompose()
-		for tag in soup():
-			for attr in attributes_to_strip:
-				if attr in tag.attrs:
-					del tag[attr]
+		for tag in soup.find_all(True):
+			for attribute in (attributes_to_strip or ()):
+				tag.attrs.pop(attribute, None)
 
-	# Always handle meta refresh tags
-	for tag in soup.find_all('meta', attrs={'http-equiv': 'refresh'}):
-		if 'content' in tag.attrs and 'https://' in tag['content']:
-			tag['content'] = tag['content'].replace('https://', 'http://')
+	_replace_inline_svgs(soup, short_image_urls)
+	if short_image_urls:
+		_rewrite_images(soup, base_url)
+	if shorten_link_urls:
+		_rewrite_navigation(soup, base_url)
+	else:
+		_downgrade_urls(soup)
 
-	# Always handle CSS with inline URLs
-	for tag in soup.find_all(['style', 'link']):
-		if tag.string:
-			tag.string = tag.string.replace('https://', 'http://')
+	for meta_tag in soup.find_all("meta", attrs={"http-equiv": "refresh"}):
+		if "content" in meta_tag.attrs:
+			meta_tag["content"] = str(meta_tag["content"]).replace("https://", "http://")
 
-	# Handle inline SVGs - first pass
-	# if any SVG has a child element containing <use href="#value"> or
-	# <use xlink:href="#value"> then we need to find _another_ SVG on the page
-	# with a child element containing <symbol id="value">, and replace the
-	# contents of the first element with the contents of the second. If the
-	# symbol tag defines a viewport, that viewport needs to be copied to the
-	# parent of the use tag (which should be a svg tag)
-	for use_tag in soup.find_all(['use']):
-		attrs = use_tag.attrs
-		if 'href' in attrs:
-			attr = 'href'
-		elif 'xlink:href' in attrs:
-			attr = 'xlink:href'
-		symbol_tag = soup.find("symbol", {"id": use_tag[attr][1:]})
-		if 'viewBox' in symbol_tag.attrs and use_tag.parent.name == 'svg' and 'viewBox' not in use_tag.parent.attrs:
-			use_tag.parent["viewBox"] = symbol_tag["viewBox"]
-		symbol_tag_copy = copy.copy(symbol_tag)
-		use_tag.replace_with(symbol_tag_copy)
-		symbol_tag_copy.unwrap()
+	if simplify_html and not is_whitelisted:
+		_apply_allowlists(soup, allowed_tags, allowed_attributes)
+	if ascii_only:
+		_transliterate_document(soup)
 
-	# Handle inline SVGs - second pass
-	# Fetch, cache, and convert them - then replace the inline <svg> tag with
-	# an <img> tag whose src attribute points to this proxy _itself_.
-	for tag in soup.find_all(['svg']):
-
-		# Set height and width equal to the viewport if one is not specified
-		svg_attrs = tag.attrs
-		if "height" not in svg_attrs and "viewBox" in svg_attrs:
-			view_box = svg_attrs["viewBox"].split(" ")
-			tag["height"] = view_box[3]
-		if "width" not in svg_attrs and "viewBox" in svg_attrs:
-			view_box = svg_attrs["viewBox"].split(" ")
-			tag["width"] = view_box[2]
-
-		# Convert it to a gif (or other specified format)
-		fake_url = hashlib.md5(str(tag).encode()).hexdigest()
-		convert = config.CONVERT_IMAGES
-		convert_to = config.CONVERT_IMAGES_TO_FILETYPE
-		fetch_and_cache_image(
-			fake_url,
-			str(tag).encode('utf-8'),
-			resize=config.RESIZE_IMAGES,
-			max_width=config.MAX_IMAGE_WIDTH,
-			max_height=config.MAX_IMAGE_HEIGHT,
-			convert=convert,
-			convert_to=convert_to,
-			dithering=config.DITHERING_ALGORITHM,
-			hash_url=False,
-		)
-		extension = convert_to.lower() if convert and convert_to else "gif"
-
-		# The _external=True attribute of `url_for` doesn't work here, and will
-		# always return `localhost` instead of our host IP / port. So grab that
-		# info from the app config directly and prepend it to a relative URL instead.
-		relative_url = url_for('serve_cached_image', filename=f"{fake_url}.{extension}")
-		url = f"http://{current_app.config['MACPROXY_HOST_AND_PORT']}{relative_url}"
-		img_attrs = {"src": url}
-		if "height" in svg_attrs:
-			img_attrs["height"] = svg_attrs["height"]
-		if "width" in svg_attrs:
-			img_attrs["width"] = svg_attrs["width"]
-		img = soup.new_tag("img", **img_attrs)
-		tag.replace_with(img)
-
-	# Use the custom formatter when converting the soup back to a string
-	html = soup.decode(formatter=URLAwareHTMLFormatter())
-
-	html = html.replace('<br/>', '<br>')
-	html = html.replace('<hr/>', '<hr>')
-	
-	# Ensure the output is properly encoded
-	html_bytes = html.encode('utf-8')
-
-	return html_bytes
+	output = soup.decode(formatter=URLAwareHTMLFormatter())
+	output = output.replace("<br/>", "<br>").replace("<hr/>", "<hr>")
+	output = re.sub(r"<(img|input)([^>]*)/>", r"<\1\2>", output)
+	return output.encode("ascii" if ascii_only else "utf-8", errors="ignore" if ascii_only else "strict")
