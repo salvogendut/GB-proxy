@@ -17,7 +17,15 @@ class GeobenchHtmlTests(unittest.TestCase):
 	def setUp(self):
 		clear_resources()
 		self.app = Flask(__name__)
-		self.app.config["MACPROXY_HOST_AND_PORT"] = "192.168.1.2:5001"
+		self.app.config.update(
+			MACPROXY_HOST_AND_PORT="192.168.1.2:5001",
+			CONVERT_IMAGES=preset.CONVERT_IMAGES,
+			CONVERT_IMAGES_TO_FILETYPE=preset.CONVERT_IMAGES_TO_FILETYPE,
+			RESIZE_IMAGES=preset.RESIZE_IMAGES,
+			MAX_IMAGE_WIDTH=preset.MAX_IMAGE_WIDTH,
+			MAX_IMAGE_HEIGHT=preset.MAX_IMAGE_HEIGHT,
+			DITHERING_ALGORITHM=preset.DITHERING_ALGORITHM,
+		)
 		self.app.add_url_rule("/i/<token>.<extension>", endpoint="serve_short_image", view_func=lambda token, extension: "")
 		self.app.add_url_rule("/u/<token>", endpoint="follow_short_url", view_func=lambda token: "")
 

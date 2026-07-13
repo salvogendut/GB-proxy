@@ -1,87 +1,27 @@
 #!/usr/bin/env bash
-set -e
-#set -x # Uncomment to Debug
+set -euo pipefail
 
-# verify packages installed
-ERROR=0
-if ! command -v python3 &> /dev/null ; then
-	echo "python3 could not be found."
-	echo "Run 'sudo apt install python3' to fix."
-	ERROR=1
-fi
-if ! python3 -m venv --help &> /dev/null ; then
-	echo "venv could not be found."
-	echo "Run 'sudo apt install python3-venv' to fix."
-	ERROR=1
-fi
-if [ $ERROR = 1 ] ; then
-	echo
-	echo "Fix errors and re-run ./start_macproxy.sh."
+PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+VENV_DIR="${PROJECT_DIR}/venv"
+
+if ! command -v python3 >/dev/null 2>&1; then
+	echo "python3 is required." >&2
 	exit 1
 fi
 
-# Test for two known broken venv states
-if test -e venv; then
-	GOOD_VENV=true
-	if ! test -e venv/bin/activate; then
-		GOOD_VENV=false
-	else
-		source venv/bin/activate
-		pip3 list &> /dev/null
-		test $? -eq 1 && GOOD_VENV=false
+if [ ! -x "${VENV_DIR}/bin/python" ]; then
+	if [ -e "${VENV_DIR}" ]; then
+		echo "${VENV_DIR} exists but is not a usable virtual environment." >&2
+		echo "Move or remove it, then run this script again." >&2
+		exit 1
 	fi
-	if ! "$GOOD_VENV"; then
-		echo "Deleting bad python venv"
-		sudo rm -rf venv
-	fi
+	echo "Creating GB-proxy virtual environment..."
+	python3 -m venv "${VENV_DIR}"
 fi
 
-# Create the venv if it doesn't exist
-cd "$(dirname "$0")"
-if ! test -e venv; then
-	echo "Creating python venv for Macproxy Plus..."
-	python3 -m venv venv
-	echo "Activating venv..."
-	source venv/bin/activate
-	echo "Installing base requirements.txt..."
-	pip3 install wheel &> /dev/null
-	pip3 install -r requirements.txt &> /dev/null
-	git rev-parse HEAD > current
+if [ ! -x "${VENV_DIR}/bin/gb-proxy" ]; then
+	echo "Installing GB-proxy and its core dependencies..."
+	"${VENV_DIR}/bin/python" -m pip install --editable "${PROJECT_DIR}"
 fi
 
-source venv/bin/activate
-
-# Gather all requirements from enabled extensions
-ALL_REQUIREMENTS=""
-for ext in $(python3 -c "import config; print(' '.join(config.ENABLED_EXTENSIONS))"); do
-	if test -e "extensions/$ext/requirements.txt"; then
-		ALL_REQUIREMENTS+=" -r extensions/$ext/requirements.txt"
-	fi
-done
-
-# Install all requirements at once if there are any
-if [ ! -z "$ALL_REQUIREMENTS" ]; then
-	echo "Installing requirements for enabled extensions..."
-	pip3 install $ALL_REQUIREMENTS -q --upgrade
-else
-	echo "No additional requirements for enabled extensions."
-fi
-
-# parse arguments
-while [ "$1" != "" ]; do
-	PARAM=$(echo "$1" | awk -F= '{print $1}')
-	VALUE=$(echo "$1" | awk -F= '{print $2}')
-	case $PARAM in
-		-p | --port)
-			PORT="--port $VALUE"
-			;;
-		*)
-			echo "ERROR: unknown parameter \"$PARAM\""
-			exit 1
-			;;
-	esac
-	shift
-done
-
-echo "Starting Macproxy Plus..."
-python3 proxy.py ${PORT}
+exec "${VENV_DIR}/bin/gb-proxy" "$@"

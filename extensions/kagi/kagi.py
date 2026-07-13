@@ -6,6 +6,7 @@ from utils.image_utils import is_image_url
 import os
 import math
 from urllib.parse import urlencode
+from utils.http_utils import DEFAULT_REQUEST_TIMEOUT
 
 DOMAIN = "kagi.com"
 OUTPUT_ENCODING = "macintosh" # change to utf-8 for modern machines
@@ -36,7 +37,7 @@ def handle_request(req):
 		args[key] = value
 
 	try:
-		response = requests.request(req.method, url, params=args)
+		response = requests.request(req.method, url, params=args, timeout=DEFAULT_REQUEST_TIMEOUT)
 		response.encoding = response.apparent_encoding
 
 		soup = BeautifulSoup(response.text, 'html.parser')
@@ -190,14 +191,7 @@ def parse_news_results(soup):
 
 def handle_image_request(req):
 	try:
-		response = requests.get(req.url, params=req.args)
+		response = requests.get(req.url, params=req.args, timeout=DEFAULT_REQUEST_TIMEOUT)
 		return response.content, response.status_code, response.headers
 	except Exception as e:
 		return f"Error: {str(e)}", 500
-
-	cached_url = fetch_and_cache_image(req.url)
-	if cached_url:
-		return send_from_directory(CACHE_DIR, os.path.basename(cached_url), mimetype='image/gif')
-	else:
-		return abort(404, "Image not found or could not be processed")
-

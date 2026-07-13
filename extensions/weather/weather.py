@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import config
 import urllib.parse
+from utils.http_utils import DEFAULT_REQUEST_TIMEOUT
 
 DOMAIN = "weather.gov"
 DEFAULT_LOCATION = config.ZIP_CODE
@@ -59,7 +60,7 @@ def handle_request(req):
 			encoded_location = urllib.parse.quote(location)
 			full_url = base_url + encoded_location
 			
-			response = requests.get(full_url)
+			response = requests.get(full_url, timeout=DEFAULT_REQUEST_TIMEOUT)
 			processed_content = process_html(response.text)
 			return processed_content, response.status_code
 		except Exception as e:

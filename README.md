@@ -1,152 +1,195 @@
 # GB-proxy
-An extensible HTTP proxy that connects GEOBENCH and other early computers to the Internet.
 
-GB-proxy is a downstream fork of [MacProxy Plus](https://github.com/hunterirving/macproxy_plus), itself based on [MacProxy](https://github.com/rdmark/macproxy). It retains MacProxy Plus's extensions and legacy-browser presets while adding a GEOBENCH profile and portable GBPC v2 image output.
+GB-proxy is an extensible HTTP proxy that connects GEOBENCH and other early
+computers to the modern Internet. It simplifies HTML, rewrites long links,
+transliterates text, and converts images into formats that constrained clients
+can display.
 
-### GEOBENCH Setup
+It is a downstream fork of
+[MacProxy Plus](https://github.com/hunterirving/macproxy_plus), itself based on
+[MacProxy](https://github.com/rdmark/macproxy). This fork adds a GEOBENCH
+compatibility profile and portable GBPC v2 image output.
 
-Create the local configuration:
+## Quick start from a checkout
+
+GB-proxy requires Python 3.9 or newer.
 
 ```shell
 cp config.py.example config.py
 ```
 
-Then enable the GEOBENCH preset in `config.py`:
+For GEOBENCH, enable its preset in `config.py`:
 
 ```python
 PRESET = "geobench"
 ```
 
-Start the proxy on the host machine:
+Start the proxy:
 
 ```shell
-./start_macproxy.sh --port=5001
+./start_macproxy.sh --host 0.0.0.0 --advertise-host 192.168.1.10 --port 5001
 ```
 
-In `BROWSER.APP`, open **Settings**, choose **Proxy**, and enter the host's LAN address, for example `http://192.168.1.10:5001`. The same value can be stored directly as `PROXY=` in `GEOBENCH.CFG`.
+The source launcher creates `venv/` and installs the project the first time it
+is used. It does not install or upgrade packages on every proxy restart.
 
-The preset:
+`--advertise-host` is the LAN address embedded in rewritten links. It is
+especially important on multihomed hosts. In `BROWSER.APP`, enter the resulting
+proxy URL, for example `http://192.168.1.10:5001`.
 
-- reduces pages to GEOBENCH's small HTML subset while retaining links and GET/POST forms;
-- rewrites links and images to short proxy-local tokens;
-- bounds image alternative text so each complete `<img>` tag fits Browser.APP's parser;
-- downloads images lazily, only when their short URL is requested;
-- resizes images to at most 160x96 pixels;
-- returns canonical four-colour GBPC v2 Mode-1 `.PIC` data that CPC, MSX2, and PCW can translate locally;
-- transliterates displayed text to printable 7-bit ASCII.
+The command listens on `127.0.0.1` by default. Binding to `0.0.0.0` deliberately
+exposes it to the local network.
 
-Current GEOBENCH releases can use the simplified pages and short links immediately. Inline images also require the corresponding lazy `<img>` support in `BROWSER.APP`.
-
-The client-to-proxy connection is intentionally plain HTTP. Run GB-proxy on a trusted LAN and do not use it for passwords or other sensitive traffic.
-
-Run the regression tests with:
+Useful commands:
 
 ```shell
+venv/bin/gb-proxy --help
+venv/bin/gb-proxy --config config.py --check-config
 venv/bin/python -m unittest discover -s tests -v
 ```
 
-### Demonstration Video (on YouTube)
+On Windows, `start_macproxy.ps1` remains available for source-tree use.
+
+## GEOBENCH profile
+
+The `geobench` preset:
+
+- reduces pages to the HTML subset supported by `BROWSER.APP`;
+- retains links and GET/POST forms;
+- rewrites links and images to short proxy-local tokens;
+- downloads and converts images lazily;
+- bounds images to 160x96 pixels;
+- emits canonical four-colour GBPC v2 Mode-1 `.PIC` data;
+- transliterates displayed text to printable 7-bit ASCII;
+- minimizes response headers for constrained parsers.
+
+Short tokens are held in a bounded, expiring in-memory registry. They therefore
+expire after a configured idle period and do not survive a service restart.
+
+## Configuration
+
+The command searches for configuration in this order:
+
+1. `--config PATH`;
+2. `GB_PROXY_CONFIG`;
+3. `./config.py`;
+4. `/etc/gb-proxy/config.py`.
+
+Presets and extensions remain compatible with the existing Python configuration
+format. Long-running service limits—including timeouts, request sizes, cache
+quota, and token lifetime—are documented in `config.py.example`.
+
+Optional extension dependencies can be installed as Python extras:
+
+```shell
+venv/bin/python -m pip install --editable '.[svg,anthropic]'
+```
+
+Available extras are `svg`, `openai`, `anthropic`, `gemini`, and `mistral`.
+The SVG extra installs a pinned dependency from GitHub and therefore needs Git
+and network access at installation time. SVG rendering is optional; raster
+image conversion and GBPC output do not require it.
+
+## systemd service
+
+The RPM installs `gb-proxy.service` but does not enable it automatically.
+
+1. Edit `/etc/gb-proxy/config.py` and select the desired preset/extensions.
+2. Edit `/etc/sysconfig/gb-proxy`.
+3. For LAN access, set `GB_PROXY_HOST=0.0.0.0` and set
+   `GB_PROXY_ADVERTISE_HOST` to the server's LAN address.
+4. Open TCP port 5001 only on a trusted interface or zone.
+5. Enable the service.
+
+```shell
+sudo systemctl enable --now gb-proxy.service
+sudo systemctl status gb-proxy.service
+journalctl -u gb-proxy.service
+```
+
+The unit runs as the unprivileged `gb-proxy` account. systemd owns the writable
+paths:
+
+- image cache: `/var/cache/gb-proxy`;
+- extension state: `/var/lib/gb-proxy`;
+- configuration: `/etc/gb-proxy/config.py`;
+- service environment: `/etc/sysconfig/gb-proxy`.
+
+The server uses one process and defaults to one request thread. Do not add
+multiple worker processes: short tokens and some extension sessions are
+intentionally process-local. Only increase `GB_PROXY_THREADS` when every enabled
+extension is known to be thread-safe and client isolation is not required.
+
+## RPM build
+
+The application is pure Python and produces a `noarch` RPM. The spec targets
+Fedora and EL9-compatible systems with EPEL/CRB enabled.
+
+Install the normal RPM build tools and the Python dependencies, then build a
+committed checkout with:
+
+```shell
+./packaging/build-rpm.sh
+```
+
+Set `RPM_TOPDIR` to use a build tree other than `~/rpmbuild`, or pass a Git ref
+as the first argument. The helper creates the source archive with `git archive`,
+so uncommitted changes are not included.
+
+For a tagged release, standard RPM tooling can fetch the sources declared by
+the spec:
+
+```shell
+spectool -g -R gb-proxy.spec
+rpmbuild -ba gb-proxy.spec
+```
+
+RPM builds are offline after the declared sources and distribution packages
+have been obtained. Dependencies are never downloaded by the service.
+
+## Extensions
+
+Extensions live under `extensions/` and are enabled through
+`ENABLED_EXTENSIONS` in the configuration. Each extension declares a domain and
+a request handler; some also provide a temporary global override mode.
+
+Bundled extensions include:
+
+- ChatGPT, Claude, Gemini, and Mistral text interfaces;
+- Wikipedia;
+- Reddit;
+- Wayback Machine;
+- Weather;
+- Web Simulator;
+- Hackaday and Hacksburg;
+- NPR and Wiby;
+- Kagi;
+- `(not) YouTube`, which additionally requires `flimmaker`.
+
+The AI extensions use API keys from the configuration file. The packaged file
+is readable only by root and the `gb-proxy` service group.
+
+## Security model
+
+The client-to-proxy connection is intentionally plain HTTP for compatibility
+with vintage systems. Treat the proxy as a trusted-LAN service:
+
+- do not send passwords or other sensitive data through it;
+- do not expose it directly to the Internet;
+- restrict port 5001 with firewalld or an equivalent firewall;
+- remember that enabled AI extensions can spend the configured API account;
+- treat AI and override extensions as single-user: their process-global session
+  state is shared by every client of the service;
+- use the default loopback bind until LAN access is explicitly required.
+
+The core proxy applies connect/read timeouts and response-size limits, uses a
+fresh upstream session per client request, bounds memory and disk caches, and
+does not write into its installed source tree.
+
+## Demonstration
 
 <a href="https://youtu.be/f1v1gWLHcOk" target="_blank">
   <img src="./readme_images/youtube_thumbnail.jpg" alt="Teaching an Old Mac New Tricks" width="400">
 </a>
 
-### Extensions
-
-Each extension has its own folder within the `extensions` directory. Extensions can be individually enabled or disabled via a `config.py` file in the root directory.
-
-To enable extensions:
-
-1. In the root directory, rename ```config.py.example``` to ```config.py``` :
-
-	```shell
-	mv config.py.example config.py
-	```
-
-2. In ```config.py```, enable/disable extensions by uncommenting/commenting lines in the ```ENABLED_EXTENSIONS``` list:
-
-	```python
-	ENABLED_EXTENSIONS = [
-		#disabled_extension,
-		"enabled_extension"
-		]
-	```
-
-### Starting MacProxy Plus
-
-On Unix-like systems (such as Linux or macOS), run the ```start_macproxy.sh``` script. It will create a Python virtual environment, install the required Python packages, and make the proxy server available on your local network.
-
-```shell
-./start_macproxy.sh
-```
-
-On Windows, run the analogous PowerShell script, ```start_macproxy.ps1```:
-
-```powershell
-.\start_macproxy.ps1
-```
-
-### Connecting to MacProxy Plus from your Vintage Machine
-To use MacProxy Plus, you'll need to configure your vintage browser or operating system to connect to the proxy server running on your host machine. The specific steps will vary depending on your browser and OS, but if your system lets you set a proxy server, it should work.
-
-If you're using a BlueSCSI to get a vintage Mac online, <a href="https://bluescsi.com/docs/WiFi-DaynaPORT">this guide</a> should help with the initial Internet setup.
-<br><br>
-![Configuring proxy settings in MacWeb 2.0c+](readme_images/proxy_settings.gif)
-<br>*Example: Configuring proxy settings in <a href="https://github.com/hunterirving/macweb-2.0c-plus">MacWeb 2.0c+</a>*
-
-### Example Extension: ChatGPT
-
-A ChatGPT extension is provided as an example. This extension serves a simple web interface that lets users interact with OpenAI's GPT models.
-
-To enable the ChatGPT extension, open ```config.py```, uncomment the ```chatgpt``` line in the ```ENABLED_EXTENSIONS``` list, and replace ```YOUR_OPENAI_API_KEY_HERE``` with your actual OpenAI API key.
-
-```python
-open_ai_api_key = "YOUR_OPENAI_API_KEY_HERE"
-
-ENABLED_EXTENSIONS = [
-	"chatgpt"
-]
-```
-
-Once enabled, Macproxy will reroute requests to ```http://chatgpt.com``` to this inteface.
-<br><br>
-<img src="readme_images/macintosh_plus.jpg">
-
-### Other Extensions
-
-#### Claude (Anthropic)
-For the discerning LLM connoisseur.
-
-#### Weather
-Get the forecast for any zip code in the US.
-
-#### Wikipedia
-Read any of over 6 million encyclopedia articles - complete with clickable links and search function.
-
-#### Reddit
-Browse any subreddit or the Reddit homepage, with support for nested comments and downloadable images... in dithered black and white.
-
-#### WayBack Machine
-Enter any date between January 1st, 1996 and today, then browse the web as it existed at that point in time. Includes full download support for images and other files backed up by the Internet Archive.
-
-#### Web Simulator
-Type a URL that doesn't exist into the address bar, and Anthropic's Claude 3.5 Sonnet will interpret the domain and any query parameters to generate an imagined version of that page on the fly. Each HTTP request is serialized and sent to the AI, along with the full HTML of the last 3 pages you visited, allowing you to explore a vast, interconnected, alternate reality Internet where the only limit is your imagination.
-
-#### (not) YouTube
-A legally distinct parody of YouTube, which uses the fantastic homebrew application <a href="https://www.macflim.com/macflim2/">MacFlim</a> (created by Fred Stark) to encode video files as a series of dithered black and white frames.
-
-#### Hackaday
-A pared-down, text-only version of hackaday.com, complete with articles, comments, and search functionality.
-
-#### npr.org
-Serves articles from the text-only version of the site (```text.npr.org```) and transforms relative urls into absolute urls for compatibility with MacWeb 2.0.
-
-#### wiby.me
-Browse Wiby's collection of personal, handmade webpages (fixes an issue where clicking "surprise me..." would not redirect users to their final destination).
-
-### Future Work
-- more extensions for more sites
-- presets targeting specific vintage machines/browsers
-- wiki with how-to guides for different machines
-
-Happy Surfing 😎
+Happy surfing.

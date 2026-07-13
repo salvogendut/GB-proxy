@@ -5,6 +5,9 @@ __pycache__/
 # Distribution / packaging
 venv/
 current
+build/
+dist/
+*.egg-info/
 
 # PyCharm metadata
 .idea/

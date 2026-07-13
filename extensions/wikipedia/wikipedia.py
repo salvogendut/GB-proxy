@@ -5,6 +5,7 @@ import requests
 from bs4 import BeautifulSoup, Comment
 import urllib.parse
 import re
+from utils.http_utils import DEFAULT_REQUEST_TIMEOUT
 
 DOMAIN = "wikipedia.org"
 
@@ -38,7 +39,7 @@ def create_search_form():
 
 def get_featured_article_snippet(lang='en'):
 	try:
-		response = requests.get(f"https://{lang}.wikipedia.org/wiki/Main_Page", headers=HEADERS)
+		response = requests.get(f"https://{lang}.wikipedia.org/wiki/Main_Page", headers=HEADERS, timeout=DEFAULT_REQUEST_TIMEOUT)
 		response.raise_for_status()
 		soup = BeautifulSoup(response.text, 'html.parser')
 		tfa_div = soup.find('div', id='mp-tfa')
@@ -86,7 +87,7 @@ def handle_wiki_page(title, lang='en'):
 	}
 	
 	try:
-		search_response = requests.get(search_url, params=params, headers=HEADERS)
+		search_response = requests.get(search_url, params=params, headers=HEADERS, timeout=DEFAULT_REQUEST_TIMEOUT)
 		search_response.raise_for_status()
 		search_data = search_response.json()
 
@@ -96,7 +97,7 @@ def handle_wiki_page(title, lang='en'):
 			
 			# Now fetch the page using the found title
 			url = f"https://{lang}.wikipedia.org/wiki/{urllib.parse.quote(found_title)}"
-			response = requests.get(url, headers=HEADERS)
+			response = requests.get(url, headers=HEADERS, timeout=DEFAULT_REQUEST_TIMEOUT)
 			response.raise_for_status()
 
 			soup = BeautifulSoup(response.text, 'html.parser')

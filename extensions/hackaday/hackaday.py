@@ -5,6 +5,7 @@ import requests
 from bs4 import BeautifulSoup, Comment
 from datetime import datetime
 import re
+from utils.http_utils import DEFAULT_REQUEST_TIMEOUT
 from urllib.parse import urlparse, unquote
 DOMAIN = "hackaday.com"
 
@@ -574,7 +575,7 @@ fresh hacks every day                 /___/
 def handle_get(req):
 	url = f"https://hackaday.com{req.path}"
 	try:
-		response = requests.get(url)
+		response = requests.get(url, timeout=DEFAULT_REQUEST_TIMEOUT)
 		processed_content = process_html(response.text, url)
 		return processed_content, response.status_code
 	except Exception as e:
@@ -591,7 +592,7 @@ def handle_request(req):
 				url += f"?{req.query_string.decode('utf-8')}"
 		
 		try:
-			response = requests.get(url)
+			response = requests.get(url, timeout=DEFAULT_REQUEST_TIMEOUT)
 			processed_content = process_html(response.text, url)
 			return processed_content, response.status_code
 		except Exception as e:

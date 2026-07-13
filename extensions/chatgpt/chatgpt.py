@@ -100,6 +100,7 @@ def chat_interface(request):
 		)
 		response_body = response.choices[0].message.content
 		messages.append({"role": "assistant", "content": response_body})
+		messages = messages[-20:]
 
 	for msg in reversed(messages[-10:]):
 		if msg['role'] == 'user':

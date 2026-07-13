@@ -15,10 +15,6 @@ from flask import current_app, url_for
 
 from utils.image_utils import fetch_and_cache_image, image_extension
 from utils.resource_registry import register_resource
-from utils.system_utils import load_preset
-
-
-config = load_preset()
 
 
 class URLAwareHTMLFormatter(HTMLFormatter):
@@ -62,7 +58,14 @@ def transcode_content(content):
 
 def _proxy_url(endpoint, **values):
 	path = url_for(endpoint, **values)
-	return f"http://{current_app.config['MACPROXY_HOST_AND_PORT']}{path}"
+	base_url = current_app.config.get("GB_PROXY_ADVERTISE_URL")
+	if not base_url:
+		base_url = f"http://{current_app.config['MACPROXY_HOST_AND_PORT']}"
+	return f"{base_url.rstrip('/')}{path}"
+
+
+def _image_setting(name, default=None):
+	return current_app.config.get(name, default)
 
 
 def _absolute_web_url(base_url, value):
@@ -76,6 +79,14 @@ def _absolute_web_url(base_url, value):
 	if urlparse(absolute).scheme.lower() not in ("http", "https"):
 		return None
 	return absolute
+
+
+def _domain_matches(host, domain):
+	if not host or not domain:
+		return False
+	host = host.rstrip(".").lower()
+	domain = domain.rstrip(".").lower()
+	return host == domain or host.endswith("." + domain)
 
 
 def _decode_data_uri(source):
@@ -120,8 +131,15 @@ def _replace_inline_svgs(soup, short_image_urls):
 				svg_attrs.setdefault("height", parts[3])
 
 		svg_data = str(svg_tag).encode("utf-8")
+		if len(svg_data) > _image_setting("MAX_INLINE_RESOURCE_BYTES", 2 * 1024 * 1024):
+			svg_tag.decompose()
+			continue
 		fake_url = "inline-svg:" + hashlib.sha256(svg_data).hexdigest()
-		extension = image_extension(config.CONVERT_IMAGES, config.CONVERT_IMAGES_TO_FILETYPE, fake_url)
+		extension = image_extension(
+			_image_setting("CONVERT_IMAGES", True),
+			_image_setting("CONVERT_IMAGES_TO_FILETYPE", "gif"),
+			fake_url,
+		)
 		if short_image_urls:
 			token = register_resource("image", fake_url, svg_data)
 			source = _proxy_url("serve_short_image", token=token, extension=extension)
@@ -129,18 +147,27 @@ def _replace_inline_svgs(soup, short_image_urls):
 			cached_url = fetch_and_cache_image(
 				fake_url,
 				svg_data,
-				resize=config.RESIZE_IMAGES,
-				max_width=config.MAX_IMAGE_WIDTH,
-				max_height=config.MAX_IMAGE_HEIGHT,
-				convert=config.CONVERT_IMAGES,
-				convert_to=config.CONVERT_IMAGES_TO_FILETYPE,
-				dithering=config.DITHERING_ALGORITHM,
+				resize=_image_setting("RESIZE_IMAGES", True),
+				max_width=_image_setting("MAX_IMAGE_WIDTH", 512),
+				max_height=_image_setting("MAX_IMAGE_HEIGHT", 342),
+				convert=_image_setting("CONVERT_IMAGES", True),
+				convert_to=_image_setting("CONVERT_IMAGES_TO_FILETYPE", "gif"),
+				dithering=_image_setting("DITHERING_ALGORITHM", "FLOYDSTEINBERG"),
 				hash_url=False,
+				cache_dir=_image_setting("GB_PROXY_CACHE_DIR"),
+				timeout=_image_setting("IMAGE_REQUEST_TIMEOUT", 30),
+				max_download_bytes=_image_setting("MAX_IMAGE_DOWNLOAD_BYTES", 16 * 1024 * 1024),
+				max_cache_bytes=_image_setting("MAX_IMAGE_CACHE_BYTES", 512 * 1024 * 1024),
+				max_cache_files=_image_setting("MAX_IMAGE_CACHE_FILES", 4096),
+				max_image_pixels=_image_setting("MAX_IMAGE_PIXELS", 16 * 1024 * 1024),
 			)
 			if not cached_url:
 				svg_tag.decompose()
 				continue
-			source = f"http://{current_app.config['MACPROXY_HOST_AND_PORT']}{cached_url}"
+			base_url = current_app.config.get("GB_PROXY_ADVERTISE_URL")
+			if not base_url:
+				base_url = f"http://{current_app.config['MACPROXY_HOST_AND_PORT']}"
+			source = f"{base_url.rstrip('/')}{cached_url}"
 
 		image_attrs = {"src": source, "data-proxy-cached": "1"}
 		for dimension in ("width", "height"):
@@ -152,7 +179,10 @@ def _replace_inline_svgs(soup, short_image_urls):
 
 
 def _rewrite_images(soup, base_url, max_alt_length=None):
-	extension = image_extension(config.CONVERT_IMAGES, config.CONVERT_IMAGES_TO_FILETYPE)
+	extension = image_extension(
+		_image_setting("CONVERT_IMAGES", True),
+		_image_setting("CONVERT_IMAGES_TO_FILETYPE", "gif"),
+	)
 	for image_tag in list(soup.find_all("img")):
 		if image_tag.attrs.pop("data-proxy-cached", None):
 			continue
@@ -171,6 +201,9 @@ def _rewrite_images(soup, base_url, max_alt_length=None):
 		if str(source).startswith("data:"):
 			content = _decode_data_uri(str(source))
 			if content is None:
+				image_tag.decompose()
+				continue
+			if len(content) > _image_setting("MAX_INLINE_RESOURCE_BYTES", 2 * 1024 * 1024):
 				image_tag.decompose()
 				continue
 			target = "inline-image:" + hashlib.sha256(content).hexdigest()
@@ -270,8 +303,8 @@ def transcode_html(document, url=None, whitelisted_domains=None, simplify_html=F
 
 	base_url = url or "http://localhost/"
 	soup = BeautifulSoup(document, "html5lib")
-	domain = urlparse(base_url).netloc
-	is_whitelisted = any(domain.endswith(item) for item in (whitelisted_domains or ()))
+	domain = urlparse(base_url).hostname
+	is_whitelisted = any(_domain_matches(domain, item) for item in (whitelisted_domains or ()))
 
 	if simplify_html and not is_whitelisted:
 		for tag in list(soup.find_all(tags_to_unwrap or ())):

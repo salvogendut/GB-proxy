@@ -1,10 +1,12 @@
 import io
+import os
 import struct
+import tempfile
 import unittest
 
 from PIL import Image
 
-from utils.image_utils import GBPC_INKS, encode_gbpc, optimize_image
+from utils.image_utils import GBPC_INKS, encode_gbpc, fetch_and_cache_image, optimize_image
 
 
 class GbpcEncodingTests(unittest.TestCase):
@@ -52,6 +54,69 @@ class GbpcEncodingTests(unittest.TestCase):
 		encoded = optimize_image(buffer.getvalue(), convert=True, convert_to="gif")
 
 		self.assertTrue(encoded.startswith(b"GIF8"))
+
+	def test_decoded_images_over_the_pixel_limit_are_rejected(self):
+		image = Image.new("RGB", (5, 5), (255, 255, 255))
+		buffer = io.BytesIO()
+		image.save(buffer, format="PNG")
+
+		encoded = optimize_image(buffer.getvalue(), max_image_pixels=24)
+
+		self.assertIsNone(encoded)
+
+	def test_cache_key_includes_transformation_settings(self):
+		image = Image.new("RGB", (8, 8), (255, 255, 255))
+		buffer = io.BytesIO()
+		image.save(buffer, format="PNG")
+
+		with tempfile.TemporaryDirectory() as directory:
+			first = fetch_and_cache_image(
+				"https://example.com/image.png",
+				buffer.getvalue(),
+				max_width=8,
+				cache_dir=directory,
+			)
+			second = fetch_and_cache_image(
+				"https://example.com/image.png",
+				buffer.getvalue(),
+				max_width=4,
+				cache_dir=directory,
+			)
+
+			self.assertNotEqual(first, second)
+			self.assertTrue(os.path.isfile(os.path.join(directory, os.path.basename(first))))
+			self.assertTrue(os.path.isfile(os.path.join(directory, os.path.basename(second))))
+
+	def test_cache_evicts_oldest_file_at_configured_limit(self):
+		image = Image.new("RGB", (4, 4), (255, 255, 255))
+		buffer = io.BytesIO()
+		image.save(buffer, format="PNG")
+
+		with tempfile.TemporaryDirectory() as directory:
+			for number in range(2):
+				fetch_and_cache_image(
+					f"https://example.com/image-{number}.png",
+					buffer.getvalue(),
+					cache_dir=directory,
+					max_cache_files=1,
+				)
+
+			self.assertEqual(len(os.listdir(directory)), 1)
+
+	def test_output_larger_than_the_cache_quota_is_rejected(self):
+		with tempfile.TemporaryDirectory() as directory:
+			cached_url = fetch_and_cache_image(
+				"https://example.com/image.png",
+				b"four",
+				resize=False,
+				convert=False,
+				cache_dir=directory,
+				max_download_bytes=4,
+				max_cache_bytes=3,
+			)
+
+			self.assertIsNone(cached_url)
+			self.assertEqual(os.listdir(directory), [])
 
 
 if __name__ == "__main__":

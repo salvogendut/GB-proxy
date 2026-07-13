@@ -12,8 +12,9 @@ import config
 DOMAIN = "notyoutube.com"
 EXTENSION_DIR = os.path.dirname(os.path.abspath(__file__))
 JSON_FILE_PATH = os.path.join(EXTENSION_DIR, "videos.json")
-FLIM_DIRECTORY = os.path.join(EXTENSION_DIR, "flims")
-PREVIEW_DIRECTORY = os.path.join(EXTENSION_DIR, "previews")
+NOTYOUTUBE_STATE_DIR = os.path.join(config.STATE_DIR, "notyoutube")
+FLIM_DIRECTORY = os.path.join(NOTYOUTUBE_STATE_DIR, "flims")
+PREVIEW_DIRECTORY = os.path.join(NOTYOUTUBE_STATE_DIR, "previews")
 PROFILE = "plus"
 
 # Ensure directories exist
@@ -169,8 +170,8 @@ def handle_video_request(video_id):
 			"--profile", PROFILE,
 			"--mp4", preview_path,
 			"--bars", "false"
-		], check=True)
-	except subprocess.CalledProcessError:
+		], check=True, timeout=getattr(config, "NOTYOUTUBE_TIMEOUT", 600))
+	except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
 		return "Error generating video", 500
 
 	if os.path.exists(flim_path):

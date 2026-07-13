@@ -2,18 +2,39 @@
 
 import hashlib
 import io
+import logging
 import mimetypes
 import os
 import struct
 import tempfile
+import threading
 
 import requests
 from PIL import Image, UnidentifiedImageError
-from PILSVG import SVG
+
+try:
+	from PILSVG import SVG
+except ImportError:  # SVG conversion is an optional feature.
+	SVG = None
 
 
-CACHE_DIR = os.path.join(os.path.dirname(__file__), "cached_images")
+LOGGER = logging.getLogger(__name__)
+_RESAMPLING = getattr(Image, "Resampling", Image)
+_DITHER = getattr(Image, "Dither", Image)
+
+
+def default_cache_dir():
+	configured = os.environ.get("GB_PROXY_CACHE_DIR")
+	if configured:
+		return os.path.abspath(os.path.expanduser(configured))
+	cache_home = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+	return os.path.join(cache_home, "gb-proxy", "images")
+
+
+CACHE_DIR = default_cache_dir()
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
+_cache_locks = tuple(threading.Lock() for _ in range(64))
+_CACHE_FORMAT_VERSION = "2"
 
 GBPC_PALETTE = (
 	(0x00, 0x00, 0x80),
@@ -48,6 +69,38 @@ def get_svg_renderer():
 			renderer = "inkscape"
 			break
 	return renderer
+
+
+def _cache_key_lock(file_path):
+	digest = hashlib.sha256(file_path.encode("utf-8")).digest()
+	return _cache_locks[digest[0] % len(_cache_locks)]
+
+
+def _prune_cache(cache_dir, max_cache_bytes, max_cache_files):
+	entries = []
+	total_bytes = 0
+	try:
+		for entry in os.scandir(cache_dir):
+			if not entry.is_file(follow_symlinks=False):
+				continue
+			stat = entry.stat(follow_symlinks=False)
+			entries.append((stat.st_mtime_ns, entry.path, stat.st_size))
+			total_bytes += stat.st_size
+	except OSError as error:
+		LOGGER.warning("Could not inspect image cache: %s", error)
+		return
+
+	entries.sort()
+	while entries and (len(entries) > max_cache_files or total_bytes > max_cache_bytes):
+		_, path, size = entries.pop(0)
+		try:
+			os.unlink(path)
+			total_bytes -= size
+		except FileNotFoundError:
+			continue
+		except OSError as error:
+			LOGGER.warning("Could not evict cached image %s: %s", path, error)
+			break
 
 
 def is_image_url(url):
@@ -209,13 +262,17 @@ def _resize_to_fit(image, max_width, max_height, width_multiple=1):
 
 	if (target_width, target_height) == image.size:
 		return image
-	return image.resize((target_width, target_height), Image.Resampling.LANCZOS)
+	return image.resize((target_width, target_height), _RESAMPLING.LANCZOS)
 
 
 def _open_image(image_data):
 	try:
 		return Image.open(io.BytesIO(image_data))
 	except UnidentifiedImageError:
+		if SVG is None:
+			raise UnidentifiedImageError(
+				"SVG conversion requires the optional pillow-svg dependency"
+			)
 		with tempfile.NamedTemporaryFile(delete=False) as temp_file:
 			temp_file.write(image_data)
 			temp_path = temp_file.name
@@ -226,11 +283,16 @@ def _open_image(image_data):
 
 
 def optimize_image(image_data, resize=True, max_width=512, max_height=342,
-				  convert=True, convert_to="gif", dithering="FLOYDSTEINBERG"):
+				  convert=True, convert_to="gif", dithering="FLOYDSTEINBERG",
+				  max_image_pixels=16 * 1024 * 1024):
 	"""Resize and convert image bytes, preserving legacy behavior on failure."""
 	target_format = (convert_to or "").lower()
 	try:
 		image = _open_image(image_data)
+		if image.width * image.height > max_image_pixels:
+			raise ValueError(
+				f"Decoded image exceeds the {max_image_pixels}-pixel limit"
+			)
 		source_format = image.format or "PNG"
 		image = _as_rgb(image)
 
@@ -245,7 +307,7 @@ def optimize_image(image_data, resize=True, max_width=512, max_height=342,
 
 		if convert and target_format == "gif":
 			image = image.convert("L")
-			dither_method = Image.Dither.FLOYDSTEINBERG if (dithering or "").upper() == "FLOYDSTEINBERG" else Image.Dither.NONE
+			dither_method = _DITHER.FLOYDSTEINBERG if (dithering or "").upper() == "FLOYDSTEINBERG" else _DITHER.NONE
 			image = image.convert("1", dither=dither_method)
 
 		output = io.BytesIO()
@@ -256,56 +318,110 @@ def optimize_image(image_data, resize=True, max_width=512, max_height=342,
 		image.save(output, format=save_format, optimize=True)
 		return output.getvalue()
 	except Exception as error:
-		print(f"Error optimizing image: {error}")
-		if convert and target_format == "pic":
+		LOGGER.warning("Could not optimize image: %s", error)
+		if convert or resize:
 			return None
 		return image_data
 
 
 def fetch_and_cache_image(url, content=None, resize=True, max_width=512, max_height=342,
 						 convert=True, convert_to="gif", dithering="FLOYDSTEINBERG",
-						 hash_url=True):
+						 hash_url=True, cache_dir=None, timeout=30,
+						 max_download_bytes=16 * 1024 * 1024,
+						 max_cache_bytes=512 * 1024 * 1024, max_cache_files=4096,
+						 max_image_pixels=16 * 1024 * 1024):
 	try:
-		print(f"Processing image: {url}")
+		LOGGER.info("Processing image from %s", url.split("?", 1)[0])
+		if min(max_download_bytes, max_cache_bytes, max_cache_files, max_image_pixels) < 1:
+			raise ValueError("Image download, cache, and pixel limits must be positive")
+		cache_dir = os.path.abspath(cache_dir or CACHE_DIR)
 		extension = image_extension(convert, convert_to, url)
-		cache_key = hashlib.md5(url.encode()).hexdigest() if hash_url else url
+		cache_material = "\0".join((
+			_CACHE_FORMAT_VERSION,
+			url,
+			str(bool(resize)),
+			str(max_width),
+			str(max_height),
+			str(bool(convert)),
+			str(convert_to),
+			str(dithering),
+			str(max_image_pixels),
+		)).encode("utf-8")
+		if content is not None:
+			cache_material += b"\0" + hashlib.sha256(content).digest()
+		cache_key = hashlib.sha256(cache_material).hexdigest()
 		file_name = f"{cache_key}.{extension}"
-		file_path = os.path.join(CACHE_DIR, file_name)
+		file_path = os.path.join(cache_dir, file_name)
 
-		if not os.path.exists(file_path):
-			print(f"Optimizing and caching image: {url}")
-			if content is None:
-				response = requests.get(url, stream=True, headers={"User-Agent": USER_AGENT}, timeout=30)
-				response.raise_for_status()
-				content = response.content
+		os.makedirs(cache_dir, exist_ok=True)
+		with _cache_key_lock(file_path):
+			if not os.path.exists(file_path):
+				LOGGER.debug("Converting image into cache file %s", file_name)
+				if content is None:
+					response = None
+					try:
+						response = requests.get(
+							url,
+							stream=True,
+							headers={"User-Agent": USER_AGENT},
+							timeout=timeout,
+						)
+						response.raise_for_status()
+						chunks = []
+						total = 0
+						for chunk in response.iter_content(chunk_size=64 * 1024):
+							if not chunk:
+								continue
+							total += len(chunk)
+							if total > max_download_bytes:
+								raise ValueError(
+									f"Image exceeds the {max_download_bytes}-byte download limit"
+								)
+							chunks.append(chunk)
+						content = b"".join(chunks)
+					finally:
+						if response is not None:
+							response.close()
+				elif len(content) > max_download_bytes:
+					raise ValueError(
+						f"Image exceeds the {max_download_bytes}-byte download limit"
+					)
 
-			if convert or resize:
-				optimized_image = optimize_image(
-					content,
-					resize=resize,
-					max_width=max_width,
-					max_height=max_height,
-					convert=convert,
-					convert_to=convert_to,
-					dithering=dithering,
-				)
+				if convert or resize:
+					optimized_image = optimize_image(
+						content,
+						resize=resize,
+						max_width=max_width,
+						max_height=max_height,
+						convert=convert,
+						convert_to=convert_to,
+						dithering=dithering,
+						max_image_pixels=max_image_pixels,
+					)
+				else:
+					optimized_image = content
+
+				if optimized_image is None:
+					raise ValueError("Image conversion produced no output")
+				if len(optimized_image) > max_cache_bytes:
+					raise ValueError(
+						f"Converted image exceeds the {max_cache_bytes}-byte cache limit"
+					)
+				temp_path = None
+				try:
+					with tempfile.NamedTemporaryFile(dir=cache_dir, delete=False) as cache_file:
+						temp_path = cache_file.name
+						cache_file.write(optimized_image)
+					os.replace(temp_path, file_path)
+				finally:
+					if temp_path and os.path.exists(temp_path):
+						os.unlink(temp_path)
+				_prune_cache(cache_dir, max_cache_bytes, max_cache_files)
 			else:
-				optimized_image = content
-
-			if optimized_image is None:
-				raise ValueError("Image conversion produced no output")
-			os.makedirs(CACHE_DIR, exist_ok=True)
-			with open(file_path, "wb") as cache_file:
-				cache_file.write(optimized_image)
-		else:
-			print(f"Image already cached: {url}")
+				LOGGER.debug("Using cached image %s", file_name)
 
 		cached_url = f"/cached_image/{file_name}"
-		print(f"Cached URL: {cached_url}")
 		return cached_url
 	except Exception as error:
-		print(f"Error processing image: {url}, Error: {error}")
+		LOGGER.warning("Could not process image from %s: %s", url.split("?", 1)[0], error)
 		return None
-
-
-os.makedirs(CACHE_DIR, exist_ok=True)

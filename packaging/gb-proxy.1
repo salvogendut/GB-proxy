@@ -1,0 +1,104 @@
+.TH GB-PROXY 1 "July 2026" "GB-proxy 0.1.0" "User Commands"
+.SH NAME
+gb-proxy \- adapt modern web content for legacy web clients
+.SH SYNOPSIS
+.B gb-proxy
+.RI [ options ]
+.SH DESCRIPTION
+.B gb-proxy
+is an extensible HTTP proxy for GEOBENCH and other constrained legacy web
+clients.  It simplifies HTML, rewrites links, and converts images into formats
+supported by early computers.
+.PP
+The packaged systemd service listens only on the loopback interface by default.
+Edit
+.I /etc/sysconfig/gb-proxy
+before exposing it to a trusted LAN.  The proxy is not intended to be exposed
+directly to the public Internet.
+.SH OPTIONS
+.TP
+.BI "--config " PATH
+Load the Python configuration file at
+.IR PATH .
+.TP
+.BI "--host " ADDRESS
+Listen on
+.IR ADDRESS .
+The default is 127.0.0.1.
+.TP
+.BI "--port " PORT
+Listen on
+.IR PORT .
+The default is 5001.
+.TP
+.BI "--advertise-host " HOST
+Use
+.I HOST
+or an absolute HTTP URL when generating proxy links returned to clients.
+.TP
+.BI "--cache-dir " PATH
+Store disposable converted resources under
+.IR PATH .
+.TP
+.BI "--state-dir " PATH
+Store persistent runtime state under
+.IR PATH .
+.TP
+.BI "--threads " COUNT
+Run the Waitress server with
+.I COUNT
+worker threads.  The default is one.  GB-proxy uses one process, and several
+bundled extensions hold process-global conversation or override state; keep one
+thread when using those extensions.
+.TP
+.B --check-config
+Validate the selected configuration and exit without starting the server.
+.TP
+.B --version
+Print the program version and exit.
+.TP
+.BR -h ", " --help
+Show command-line help and exit.
+.SH ENVIRONMENT
+.TP
+.B GB_PROXY_CONFIG
+Configuration path used when
+.B --config
+is not supplied.
+.TP
+.B GB_PROXY_HOST
+Default listening address.
+.TP
+.B GB_PROXY_PORT
+Default listening port.
+.TP
+.B GB_PROXY_CACHE_DIR
+Default cache directory.
+.TP
+.B GB_PROXY_STATE_DIR
+Default state directory.
+.TP
+.B GB_PROXY_ADVERTISE_HOST
+Default host or HTTP URL used in generated proxy links.
+.TP
+.B GB_PROXY_THREADS
+Default number of Waitress threads.
+.TP
+.B GB_PROXY_LOG_LEVEL
+Python logging level.  The default is INFO.
+.SH FILES
+.TP
+.I /etc/gb-proxy/config.py
+System configuration file.
+.TP
+.I /etc/sysconfig/gb-proxy
+Service command-line settings.
+.TP
+.I /var/cache/gb-proxy
+Packaged service cache directory.
+.TP
+.I /var/lib/gb-proxy
+Packaged service state directory.
+.SH SEE ALSO
+.BR systemctl (1),
+.BR systemd.service (5)

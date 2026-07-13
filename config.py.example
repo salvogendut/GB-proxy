@@ -31,6 +31,21 @@ ENABLED_EXTENSIONS = [
 	#"wikipedia",
 ]
 
+# Long-running service safety limits. Values are bytes or seconds unless noted.
+UPSTREAM_CONNECT_TIMEOUT = 5
+UPSTREAM_READ_TIMEOUT = 30
+IMAGE_REQUEST_TIMEOUT = 30
+MAX_CLIENT_REQUEST_BYTES = 1024 * 1024
+MAX_UPSTREAM_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_IMAGE_DOWNLOAD_BYTES = 16 * 1024 * 1024
+MAX_IMAGE_CACHE_BYTES = 512 * 1024 * 1024
+MAX_IMAGE_CACHE_FILES = 4096
+MAX_IMAGE_PIXELS = 16 * 1024 * 1024
+MAX_INLINE_RESOURCE_BYTES = 2 * 1024 * 1024
+RESOURCE_MAX_ENTRIES = 4096  # Per resource type (links and images)
+RESOURCE_TTL_SECONDS = 3600
+NOTYOUTUBE_TIMEOUT = 600
+
 # While SIMPLIFY_HTML is True, you can use WHITELISTED_DOMAINS to disable post-processing for
 # specific sites (only perform HTTPS -> HTTP conversion and character conversion (if CONVERT_CHARACTERS is True),
 # without otherwise modifying the page's source code).

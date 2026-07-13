@@ -107,6 +107,7 @@ def chat_interface(request):
 			error_message = f"Error: {str(e)}"
 			messages.append({"role": "user", "content": user_input})
 			messages.append({"role": "assistant", "content": error_message})
+		messages = messages[-20:]
 	
 	# Generate output HTML
 	for msg in reversed(messages[-10:]):
