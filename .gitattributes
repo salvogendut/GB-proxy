@@ -1,0 +1,3 @@
+# Two legacy extension modules use CRLF. Treat the carriage return as part of
+# the line ending while retaining Git's normal whitespace checks.
+*.py whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

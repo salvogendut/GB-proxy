@@ -96,11 +96,11 @@ def chat_interface(request):
 			)
 			response_body = response.content[0].text
 			messages.append({"role": "assistant", "content": response_body})
-			print(response_body)
 
 		except Exception as e:
 			response_body = f"An error occurred: {str(e)}"
 			messages.append({"role": "assistant", "content": response_body})
+		messages = messages[-20:]
 
 	for msg in reversed(messages[-10:]):
 		if msg['role'] == 'user':

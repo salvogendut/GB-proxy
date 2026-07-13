@@ -1,4 +1,5 @@
 import requests
+from utils.http_utils import DEFAULT_REQUEST_TIMEOUT
 from flask import redirect
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
@@ -11,7 +12,7 @@ def handle_request(request):
 	else:
 		url = request.url.replace("https://", "http://", 1)
 
-		resp = requests.get(url)
+		resp = requests.get(url, timeout=DEFAULT_REQUEST_TIMEOUT)
 		
 		# If it's the homepage, modify the page structure
 		if url == "http://wiby.me" or url == "http://wiby.me/":
@@ -31,7 +32,7 @@ def get_final_surprise_url():
 	redirects = 0
 
 	while redirects < max_redirects:
-		resp = requests.get(url, allow_redirects=False)
+		resp = requests.get(url, allow_redirects=False, timeout=DEFAULT_REQUEST_TIMEOUT)
 
 		if resp.status_code in (301, 302, 303, 307, 308):
 			url = urljoin(url, resp.headers['Location'])

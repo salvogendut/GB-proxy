@@ -1,101 +1,130 @@
-# Standard Library imports
+"""Configuration and preset loading helpers."""
+
+import importlib
+import importlib.machinery
+import importlib.util
+import logging
 import os
+import re
+import sys
 
-def load_preset():
-	# Try to import config.py first
+
+LOGGER = logging.getLogger(__name__)
+_PRESET_NAME = re.compile(r"^[A-Za-z0-9_]+$")
+_OVERRIDE_VARS = (
+	"SIMPLIFY_HTML",
+	"TAGS_TO_STRIP",
+	"TAGS_TO_UNWRAP",
+	"ATTRIBUTES_TO_STRIP",
+	"ALLOWED_HTML_TAGS",
+	"ALLOWED_HTML_ATTRIBUTES",
+	"SHORTEN_LINK_URLS",
+	"SHORT_IMAGE_URLS",
+	"MAX_IMAGE_ALT_LENGTH",
+	"ASCII_ONLY",
+	"MINIMAL_RESPONSE_HEADERS",
+	"CAN_RENDER_INLINE_IMAGES",
+	"RESIZE_IMAGES",
+	"MAX_IMAGE_WIDTH",
+	"MAX_IMAGE_HEIGHT",
+	"CONVERT_IMAGES",
+	"CONVERT_IMAGES_TO_FILETYPE",
+	"DITHERING_ALGORITHM",
+	"WEB_SIMULATOR_PROMPT_ADDENDUM",
+	"CONVERT_CHARACTERS",
+	"CONVERSION_TABLE",
+)
+
+
+class ConfigurationError(RuntimeError):
+	"""Raised when GB-proxy cannot load a usable configuration."""
+
+
+def _load_module_from_path(path):
+	path = os.path.abspath(os.path.expanduser(path))
+	if not os.path.isfile(path):
+		raise ConfigurationError(f"Configuration file not found: {path}")
+
+	loader = importlib.machinery.SourceFileLoader("_gb_proxy_user_config", path)
+	spec = importlib.util.spec_from_file_location(
+		"_gb_proxy_user_config",
+		path,
+		loader=loader,
+	)
+	if spec is None or spec.loader is None:
+		raise ConfigurationError(f"Could not create a module for configuration: {path}")
+
+	module = importlib.util.module_from_spec(spec)
 	try:
-		import config
-	except ModuleNotFoundError:
-		print("config.py not found, exiting.")
-		quit()
+		spec.loader.exec_module(module)
+	except Exception as error:
+		raise ConfigurationError(f"Could not load configuration {path}: {error}") from error
 
-	"""
-	Load preset configuration and override default settings if a preset is specified
-	"""
-	if not hasattr(config, 'PRESET') or not config.PRESET:
+	module.CONFIG_PATH = path
+	sys.modules["config"] = module
+	return module
+
+
+def apply_preset(config):
+	"""Overlay the selected compatibility preset onto a config module."""
+	if getattr(config, "_GB_PROXY_PRESET_APPLIED", False):
 		return config
 
-	preset_name = config.PRESET
-	preset_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../presets', preset_name)
-	preset_file = os.path.join(preset_dir, f"{preset_name}.py")
-
-	if not os.path.exists(preset_dir):
-		print(f"Error: Preset directory not found: {preset_dir}")
-		print(f"Make sure the preset '{preset_name}' exists in the presets directory")
-		quit()
-
-	if not os.path.exists(preset_file):
-		print(f"Error: Preset file not found: {preset_file}")
-		print(f"Make sure {preset_name}.py exists in the {preset_name} directory")
-		quit()
-
-	try:
-		# Import the preset module
-		import importlib.util
-		spec = importlib.util.spec_from_file_location(preset_name, preset_file)
-		preset_module = importlib.util.module_from_spec(spec)
-		spec.loader.exec_module(preset_module)
-
-		# List of variables that can be overridden by presets
-		override_vars = [
-			'SIMPLIFY_HTML',
-			'TAGS_TO_STRIP',
-			'TAGS_TO_UNWRAP',
-			'ATTRIBUTES_TO_STRIP',
-			'ALLOWED_HTML_TAGS',
-			'ALLOWED_HTML_ATTRIBUTES',
-			'SHORTEN_LINK_URLS',
-			'SHORT_IMAGE_URLS',
-			'MAX_IMAGE_ALT_LENGTH',
-			'ASCII_ONLY',
-			'MINIMAL_RESPONSE_HEADERS',
-			'CAN_RENDER_INLINE_IMAGES',
-			'RESIZE_IMAGES',
-			'MAX_IMAGE_WIDTH',
-			'MAX_IMAGE_HEIGHT',
-			'CONVERT_IMAGES',
-			'CONVERT_IMAGES_TO_FILETYPE',
-			'DITHERING_ALGORITHM',
-			'WEB_SIMULATOR_PROMPT_ADDENDUM',
-			'CONVERT_CHARACTERS',
-			'CONVERSION_TABLE'
-		]
-
-		changes_made = False
-		# Override config variables with preset values
-		for var in override_vars:
-			if hasattr(preset_module, var):
-				preset_value = getattr(preset_module, var)
-				if not hasattr(config, var) or getattr(config, var) != preset_value:
-					changes_made = True
-					old_value = getattr(config, var) if hasattr(config, var) else None
-					setattr(config, var, preset_value)
-					
-					# Format the values for printing
-					def format_value(val):
-						if isinstance(val, (list, dict)):
-							return str(val)
-						elif isinstance(val, str):
-							return f"'{val}'"
-						else:
-							return str(val)
-					if old_value is None:
-						val = str(format_value(preset_value)).replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
-						truncated = val[:100] + ('...' if len(val) > 100 else '')
-						print(f"Preset '{preset_name}' set {var} to {truncated}")
-					else:
-						old_val = str(format_value(old_value)).replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
-						new_val = str(format_value(preset_value)).replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
-						old_truncated = old_val[:100] + ('...' if len(old_val) > 100 else '')
-						new_truncated = new_val[:100] + ('...' if len(new_val) > 100 else '')
-						print(f"Preset '{preset_name}' changed {var} from {old_truncated} to {new_truncated}")
-		if changes_made:
-			print(f"Successfully loaded preset: {preset_name}")
-		else:
-			print(f"Loaded preset '{preset_name}' (no changes were necessary)")
-
+	preset_name = getattr(config, "PRESET", None)
+	if not preset_name:
+		config._GB_PROXY_PRESET_APPLIED = True
 		return config
+	if not isinstance(preset_name, str) or not _PRESET_NAME.fullmatch(preset_name):
+		raise ConfigurationError(f"Invalid preset name: {preset_name!r}")
 
-	except Exception as e:
-		print(f"Error loading preset '{preset_name}': {str(e)}")
-		quit()
+	module_name = f"presets.{preset_name}.{preset_name}"
+	try:
+		preset_module = importlib.import_module(module_name)
+	except ModuleNotFoundError as error:
+		if error.name == module_name or (error.name and module_name.startswith(error.name + ".")):
+			raise ConfigurationError(f"Preset not found: {preset_name}") from error
+		raise ConfigurationError(
+			f"Could not import preset {preset_name}: missing dependency {error.name}"
+		) from error
+	except Exception as error:
+		raise ConfigurationError(f"Could not load preset {preset_name}: {error}") from error
+
+	changed = []
+	for name in _OVERRIDE_VARS:
+		if not hasattr(preset_module, name):
+			continue
+		value = getattr(preset_module, name)
+		if not hasattr(config, name) or getattr(config, name) != value:
+			setattr(config, name, value)
+			changed.append(name)
+
+	config._GB_PROXY_PRESET_APPLIED = True
+	LOGGER.info("Loaded preset %s%s", preset_name, f" ({', '.join(changed)})" if changed else "")
+	return config
+
+
+def load_config(path):
+	"""Load an explicit Python configuration file and apply its preset."""
+	return apply_preset(_load_module_from_path(path))
+
+
+def load_preset(config_path=None):
+	"""Compatibility loader for callers that previously imported local config.py."""
+	if config_path:
+		return load_config(config_path)
+
+	environment_path = os.environ.get("GB_PROXY_CONFIG")
+	if environment_path:
+		return load_config(environment_path)
+
+	config = sys.modules.get("config")
+	if config is None:
+		try:
+			config = importlib.import_module("config")
+		except ModuleNotFoundError as error:
+			if error.name == "config":
+				raise ConfigurationError(
+					"No configuration found; pass --config or set GB_PROXY_CONFIG"
+				) from error
+			raise
+	return apply_preset(config)

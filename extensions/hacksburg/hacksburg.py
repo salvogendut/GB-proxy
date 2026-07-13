@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 import json
+from utils.http_utils import DEFAULT_REQUEST_TIMEOUT
 
 DOMAIN = "hacksburg.org"
 
@@ -195,14 +196,14 @@ def process_html(content, path):
 def handle_get(req):
 	url = f"https://{DOMAIN}{req.path}"
 	try:
-		response = requests.get(url)
+		response = requests.get(url, timeout=DEFAULT_REQUEST_TIMEOUT)
 		processed_content = process_html(response.text, req.path)
 
 		# Only append posts for the homepage
 		if req.path == "/":
 			# Retrieve and process JSON data
 			json_url = "https://hacksburg.org/posts.json"
-			json_response = requests.get(json_url)
+			json_response = requests.get(json_url, timeout=DEFAULT_REQUEST_TIMEOUT)
 			if json_response.status_code == 200:
 				data = json_response.json()
 

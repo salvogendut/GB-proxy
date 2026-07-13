@@ -1,6 +1,7 @@
 from flask import request, redirect
 import requests
 from bs4 import BeautifulSoup
+from utils.http_utils import DEFAULT_REQUEST_TIMEOUT
 
 DOMAIN = "npr.org"
 
@@ -13,7 +14,7 @@ DOMAIN = "npr.org"
 def handle_get(req):
 	url = f"https://text.npr.org{req.path}"
 	try:
-		response = requests.get(url)
+		response = requests.get(url, timeout=DEFAULT_REQUEST_TIMEOUT)
 
 		# Parse the HTML and remove the <header> tag
 		soup = BeautifulSoup(response.text, 'html.parser')

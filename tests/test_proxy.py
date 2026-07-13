@@ -1,4 +1,5 @@
 import io
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,16 +11,23 @@ from tests.config_stub import install_config
 
 install_config()
 
-import proxy
+from gb_proxy.application import create_app
 from utils.resource_registry import clear_resources, register_resource
 
 
 class GeobenchProxyRouteTests(unittest.TestCase):
 	def setUp(self):
-		proxy.app.config["MACPROXY_HOST_AND_PORT"] = "127.0.0.1:5001"
-		proxy.clear_image_cache()
+		self.temp_directory = tempfile.TemporaryDirectory()
+		self.addCleanup(self.temp_directory.cleanup)
+		self.app = create_app(
+			install_config(),
+			cache_dir=self.temp_directory.name,
+			state_dir=self.temp_directory.name,
+			advertise_url="http://127.0.0.1:5001",
+		)
+		self.runtime = self.app.extensions["gb_proxy_runtime"]
 		clear_resources()
-		self.client = proxy.app.test_client()
+		self.client = self.app.test_client()
 
 	def test_short_image_route_returns_gbpc(self):
 		image = Image.new("RGB", (8, 4), (255, 0, 0))
@@ -45,14 +53,15 @@ class GeobenchProxyRouteTests(unittest.TestCase):
 			url="https://search.example/find?source=gb&q=retro",
 		)
 
-		with patch.object(proxy.http_session, "get", return_value=upstream) as request_get:
+		with patch.object(self.runtime, "request_callable", return_value=upstream) as request_get:
 			response = self.client.get(f"/u/{token}?q=retro")
 
 		self.assertEqual(response.status_code, 200)
 		self.assertNotIn("X-Upstream", response.headers)
 		call = request_get.call_args
-		self.assertEqual(call.args[0], "https://search.example/find?source=gb")
+		self.assertEqual(call.args[:2], ("GET", "https://search.example/find?source=gb"))
 		self.assertEqual(call.kwargs["params"].get("q"), "retro")
+		self.assertEqual(call.kwargs["timeout"], (5.0, 30.0))
 
 	def test_direct_get_does_not_duplicate_existing_query(self):
 		upstream = SimpleNamespace(
@@ -62,12 +71,12 @@ class GeobenchProxyRouteTests(unittest.TestCase):
 			url="http://example.com/search?q=once",
 		)
 
-		with patch.object(proxy.http_session, "get", return_value=upstream) as request_get:
+		with patch.object(self.runtime, "request_callable", return_value=upstream) as request_get:
 			response = self.client.get("/search?q=once", base_url="http://example.com")
 
 		self.assertEqual(response.status_code, 200)
 		call = request_get.call_args
-		self.assertEqual(call.args[0], "http://example.com/search?q=once")
+		self.assertEqual(call.args[:2], ("GET", "http://example.com/search?q=once"))
 		self.assertIsNone(call.kwargs["params"])
 
 

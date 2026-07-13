@@ -1,0 +1,13 @@
+include LICENSE
+include README.md
+include config.py.example
+include requirements.txt
+include setup.cfg
+include setup.py
+include start_macproxy.sh
+include start_macproxy.ps1
+include gb-proxy.spec
+recursive-include packaging *
+recursive-include tests *.py
+recursive-include extensions requirements.txt
+recursive-include readme_images *.gif *.jpg
