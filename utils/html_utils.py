@@ -156,6 +156,7 @@ def _replace_inline_svgs(soup, short_image_urls):
 				hash_url=False,
 				cache_dir=_image_setting("GB_PROXY_CACHE_DIR"),
 				timeout=_image_setting("IMAGE_REQUEST_TIMEOUT", 30),
+				svg_timeout=_image_setting("SVG_CONVERSION_TIMEOUT", 10),
 				max_download_bytes=_image_setting("MAX_IMAGE_DOWNLOAD_BYTES", 16 * 1024 * 1024),
 				max_cache_bytes=_image_setting("MAX_IMAGE_CACHE_BYTES", 512 * 1024 * 1024),
 				max_cache_files=_image_setting("MAX_IMAGE_CACHE_FILES", 4096),

@@ -30,6 +30,7 @@ def install_config(preset="geobench"):
 	config.CONVERT_IMAGES = True
 	config.CONVERT_IMAGES_TO_FILETYPE = "gif"
 	config.DITHERING_ALGORITHM = "FLOYDSTEINBERG"
+	config.SVG_CONVERSION_TIMEOUT = 10
 	config.WEB_SIMULATOR_PROMPT_ADDENDUM = ""
 	config.CONVERT_CHARACTERS = True
 	config.CONVERSION_TABLE = {

@@ -179,6 +179,7 @@ def create_app(
 	):
 		_positive_setting(settings, name, default)
 	_positive_setting(settings, "IMAGE_REQUEST_TIMEOUT", 30, float)
+	_positive_setting(settings, "SVG_CONVERSION_TIMEOUT", 10, float)
 	connect_timeout = _positive_setting(settings, "UPSTREAM_CONNECT_TIMEOUT", 5, float)
 	read_timeout = _positive_setting(settings, "UPSTREAM_READ_TIMEOUT", 30, float)
 	try:
@@ -225,6 +226,7 @@ def _cache_image(runtime, url, content=None):
 		dithering=settings.DITHERING_ALGORITHM,
 		cache_dir=runtime.cache_dir,
 		timeout=float(getattr(settings, "IMAGE_REQUEST_TIMEOUT", 30)),
+		svg_timeout=float(getattr(settings, "SVG_CONVERSION_TIMEOUT", 10)),
 		max_download_bytes=int(
 			getattr(settings, "MAX_IMAGE_DOWNLOAD_BYTES", 16 * 1024 * 1024)
 		),
