@@ -3,20 +3,17 @@
 import hashlib
 import io
 import logging
+import math
 import mimetypes
 import os
+import re
 import struct
+import subprocess
 import tempfile
 import threading
 
 import requests
 from PIL import Image, UnidentifiedImageError
-
-try:
-	from PILSVG import SVG
-except ImportError:  # SVG conversion is an optional feature.
-	SVG = None
-
 
 LOGGER = logging.getLogger(__name__)
 _RESAMPLING = getattr(Image, "Resampling", Image)
@@ -34,7 +31,11 @@ def default_cache_dir():
 CACHE_DIR = default_cache_dir()
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
 _cache_locks = tuple(threading.Lock() for _ in range(64))
-_CACHE_FORMAT_VERSION = "2"
+_CACHE_FORMAT_VERSION = "3"
+_RSVG_CONVERT = "/usr/bin/rsvg-convert"
+_SVG_CONVERSION_TIMEOUT = 10
+_SVG_SNIFF_BYTES = 64 * 1024
+_SVG_MAX_DIMENSION = 32767
 
 GBPC_PALETTE = (
 	(0x00, 0x00, 0x80),
@@ -61,14 +62,115 @@ _IMAGE_MIME_TYPES = {
 }
 
 
-def get_svg_renderer():
-	"""Prefer Inkscape when available and otherwise use pillow-svg's Skia path."""
-	renderer = "skia"
-	for path in os.environ.get("PATH", "").split(os.pathsep):
-		if os.path.exists(os.path.expandvars(os.path.join(path, "inkscape"))):
-			renderer = "inkscape"
-			break
-	return renderer
+def _is_svg(image_data):
+	"""Recognize an SVG root element without parsing untrusted XML in-process."""
+	sample = image_data[:_SVG_SNIFF_BYTES].lstrip(b"\xef\xbb\xbf \t\r\n")
+	return re.search(
+		br"<(?:[A-Za-z_][\w.-]*:)?svg(?:\s|>)",
+		sample,
+		re.IGNORECASE,
+	) is not None
+
+
+def _svg_render_limits(resize, max_width, max_height, max_image_pixels):
+	if max_image_pixels < 1:
+		raise ValueError("The decoded image pixel limit must be positive")
+	if not resize:
+		dimension = min(_SVG_MAX_DIMENSION, max(1, math.isqrt(max_image_pixels)))
+		return dimension, dimension
+
+	width = min(_SVG_MAX_DIMENSION, int(max_width) if max_width else max_image_pixels)
+	height = min(_SVG_MAX_DIMENSION, int(max_height) if max_height else max_image_pixels)
+	if width < 1 or height < 1:
+		raise ValueError("SVG render dimensions must be positive")
+	if width * height > max_image_pixels:
+		scale = math.sqrt(max_image_pixels / (width * height))
+		width = max(1, int(width * scale))
+		height = max(1, int(height * scale))
+		height = min(height, max_image_pixels // width)
+	return width, height
+
+
+def _converter_error_detail(stderr):
+	stderr.seek(0)
+	detail = stderr.read(1024).decode("utf-8", errors="replace")
+	detail = re.sub(r"[\x00-\x1f\x7f]+", " ", detail)
+	detail = " ".join(detail.split())
+	return detail[:240]
+
+
+def _render_svg(
+	image_data,
+	*,
+	resize,
+	max_width,
+	max_height,
+	max_image_pixels,
+	timeout,
+	max_output_bytes,
+):
+	width_limit, height_limit = _svg_render_limits(
+		resize,
+		max_width,
+		max_height,
+		max_image_pixels,
+	)
+	command = [
+		_RSVG_CONVERT,
+		"-f",
+		"png",
+		"-a",
+		"-z",
+		"1",
+		"-w",
+		str(width_limit),
+		"-h",
+		str(height_limit),
+	]
+	with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+		try:
+			completed = subprocess.run(
+				command,
+				input=image_data,
+				stdout=output,
+				stderr=errors,
+				check=False,
+				timeout=timeout,
+				start_new_session=True,
+			)
+		except FileNotFoundError as error:
+			raise UnidentifiedImageError(
+				"SVG conversion requires /usr/bin/rsvg-convert; install librsvg2-tools"
+			) from error
+		except subprocess.TimeoutExpired as error:
+			raise UnidentifiedImageError(
+				f"SVG conversion timed out after {timeout:g} seconds"
+			) from error
+		except OSError as error:
+			raise UnidentifiedImageError(f"Could not run rsvg-convert: {error}") from error
+
+		if completed.returncode:
+			detail = _converter_error_detail(errors)
+			message = f"rsvg-convert failed with status {completed.returncode}"
+			if detail:
+				message += f": {detail}"
+			raise UnidentifiedImageError(message)
+
+		output.seek(0, os.SEEK_END)
+		output_size = output.tell()
+		if output_size < 1:
+			raise UnidentifiedImageError("rsvg-convert produced no image data")
+		if output_size > max_output_bytes:
+			raise UnidentifiedImageError(
+				f"SVG render exceeds the {max_output_bytes}-byte intermediate limit"
+			)
+		output.seek(0)
+		try:
+			image = Image.open(io.BytesIO(output.read()))
+			image.load()
+			return image
+		except (OSError, UnidentifiedImageError) as error:
+			raise UnidentifiedImageError("rsvg-convert produced an invalid image") from error
 
 
 def _cache_key_lock(file_path):
@@ -265,58 +367,105 @@ def _resize_to_fit(image, max_width, max_height, width_multiple=1):
 	return image.resize((target_width, target_height), _RESAMPLING.LANCZOS)
 
 
-def _open_image(image_data):
+def _open_image(
+	image_data,
+	*,
+	resize,
+	max_width,
+	max_height,
+	max_image_pixels,
+	svg_timeout,
+	max_intermediate_bytes,
+):
 	try:
 		return Image.open(io.BytesIO(image_data))
 	except UnidentifiedImageError:
-		if SVG is None:
-			raise UnidentifiedImageError(
-				"SVG conversion requires the optional pillow-svg dependency"
-			)
-		with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-			temp_file.write(image_data)
-			temp_path = temp_file.name
-		try:
-			return SVG(temp_path).im(renderer=get_svg_renderer())
-		finally:
-			os.unlink(temp_path)
+		if not _is_svg(image_data):
+			raise
+		return _render_svg(
+			image_data,
+			resize=resize,
+			max_width=max_width,
+			max_height=max_height,
+			max_image_pixels=max_image_pixels,
+			timeout=svg_timeout,
+			max_output_bytes=max_intermediate_bytes,
+		)
+
+
+def _optimize_image(
+	image_data,
+	resize,
+	max_width,
+	max_height,
+	convert,
+	convert_to,
+	dithering,
+	max_image_pixels,
+	svg_timeout,
+	max_intermediate_bytes,
+):
+	target_format = (convert_to or "").lower()
+	image = _open_image(
+		image_data,
+		resize=resize,
+		max_width=max_width,
+		max_height=max_height,
+		max_image_pixels=max_image_pixels,
+		svg_timeout=svg_timeout,
+		max_intermediate_bytes=max_intermediate_bytes,
+	)
+	if image.width * image.height > max_image_pixels:
+		raise ValueError(
+			f"Decoded image exceeds the {max_image_pixels}-pixel limit"
+		)
+	source_format = image.format or "PNG"
+	image = _as_rgb(image)
+
+	if resize or target_format == "pic":
+		width_multiple = 4 if target_format == "pic" else 1
+		fit_width = max_width if resize else None
+		fit_height = max_height if resize else None
+		image = _resize_to_fit(image, fit_width, fit_height, width_multiple)
+
+	if convert and target_format == "pic":
+		return encode_gbpc(image, dithering)
+
+	if convert and target_format == "gif":
+		image = image.convert("L")
+		dither_method = _DITHER.FLOYDSTEINBERG if (dithering or "").upper() == "FLOYDSTEINBERG" else _DITHER.NONE
+		image = image.convert("1", dither=dither_method)
+
+	output = io.BytesIO()
+	if convert and target_format:
+		save_format = {"jpg": "JPEG"}.get(target_format, target_format.upper())
+	else:
+		save_format = source_format
+	image.save(output, format=save_format, optimize=True)
+	return output.getvalue()
 
 
 def optimize_image(image_data, resize=True, max_width=512, max_height=342,
 				  convert=True, convert_to="gif", dithering="FLOYDSTEINBERG",
-				  max_image_pixels=16 * 1024 * 1024):
+				  max_image_pixels=16 * 1024 * 1024,
+				  svg_timeout=_SVG_CONVERSION_TIMEOUT,
+				  max_intermediate_bytes=None):
 	"""Resize and convert image bytes, preserving legacy behavior on failure."""
-	target_format = (convert_to or "").lower()
+	if max_intermediate_bytes is None:
+		max_intermediate_bytes = max(1024 * 1024, max_image_pixels * 5)
 	try:
-		image = _open_image(image_data)
-		if image.width * image.height > max_image_pixels:
-			raise ValueError(
-				f"Decoded image exceeds the {max_image_pixels}-pixel limit"
-			)
-		source_format = image.format or "PNG"
-		image = _as_rgb(image)
-
-		if resize or target_format == "pic":
-			width_multiple = 4 if target_format == "pic" else 1
-			fit_width = max_width if resize else None
-			fit_height = max_height if resize else None
-			image = _resize_to_fit(image, fit_width, fit_height, width_multiple)
-
-		if convert and target_format == "pic":
-			return encode_gbpc(image, dithering)
-
-		if convert and target_format == "gif":
-			image = image.convert("L")
-			dither_method = _DITHER.FLOYDSTEINBERG if (dithering or "").upper() == "FLOYDSTEINBERG" else _DITHER.NONE
-			image = image.convert("1", dither=dither_method)
-
-		output = io.BytesIO()
-		if convert and target_format:
-			save_format = {"jpg": "JPEG"}.get(target_format, target_format.upper())
-		else:
-			save_format = source_format
-		image.save(output, format=save_format, optimize=True)
-		return output.getvalue()
+		return _optimize_image(
+			image_data,
+			resize,
+			max_width,
+			max_height,
+			convert,
+			convert_to,
+			dithering,
+			max_image_pixels,
+			svg_timeout,
+			max_intermediate_bytes,
+		)
 	except Exception as error:
 		LOGGER.warning("Could not optimize image: %s", error)
 		if convert or resize:
@@ -327,6 +476,7 @@ def optimize_image(image_data, resize=True, max_width=512, max_height=342,
 def fetch_and_cache_image(url, content=None, resize=True, max_width=512, max_height=342,
 						 convert=True, convert_to="gif", dithering="FLOYDSTEINBERG",
 						 hash_url=True, cache_dir=None, timeout=30,
+						 svg_timeout=_SVG_CONVERSION_TIMEOUT,
 						 max_download_bytes=16 * 1024 * 1024,
 						 max_cache_bytes=512 * 1024 * 1024, max_cache_files=4096,
 						 max_image_pixels=16 * 1024 * 1024):
@@ -388,21 +538,24 @@ def fetch_and_cache_image(url, content=None, resize=True, max_width=512, max_hei
 					)
 
 				if convert or resize:
-					optimized_image = optimize_image(
-						content,
-						resize=resize,
-						max_width=max_width,
-						max_height=max_height,
-						convert=convert,
-						convert_to=convert_to,
-						dithering=dithering,
-						max_image_pixels=max_image_pixels,
-					)
+					try:
+						optimized_image = _optimize_image(
+							content,
+							resize,
+							max_width,
+							max_height,
+							convert,
+							convert_to,
+							dithering,
+							max_image_pixels,
+							svg_timeout,
+							min(max_cache_bytes, max(1024 * 1024, max_image_pixels * 5)),
+						)
+					except Exception as error:
+						raise ValueError(f"Image conversion failed: {error}") from error
 				else:
 					optimized_image = content
 
-				if optimized_image is None:
-					raise ValueError("Image conversion produced no output")
 				if len(optimized_image) > max_cache_bytes:
 					raise ValueError(
 						f"Converted image exceeds the {max_cache_bytes}-byte cache limit"

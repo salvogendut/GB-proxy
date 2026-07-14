@@ -1,5 +1,5 @@
 Name:           gb-proxy
-Version:        0.1.0
+Version:        0.1.1
 Release:        1%{?dist}
 Summary:        HTTP proxy for GEOBENCH and other legacy web clients
 
@@ -12,6 +12,7 @@ BuildArch:      noarch
 BuildRequires:  python3-devel
 BuildRequires:  pyproject-rpm-macros
 BuildRequires:  systemd-rpm-macros
+Requires:       /usr/bin/rsvg-convert
 %{?sysusers_requires_compat}
 
 %description
@@ -77,5 +78,9 @@ install -Dpm 0640 config.py.example %{buildroot}%{_sysconfdir}/%{name}/config.py
 
 
 %changelog
+* Tue Jul 14 2026 Salvatore Bognanni <salvogendut@users.noreply.github.com> - 0.1.1-1
+- Render SVG images with the distribution-provided rsvg-convert utility
+- Require the SVG converter for complete image support
+
 * Mon Jul 13 2026 Salvatore Bognanni <salvogendut@users.noreply.github.com> - 0.1.0-1
 - Initial RPM package with a hardened systemd service

@@ -82,13 +82,14 @@ quota, and token lifetime—are documented in `config.py.example`.
 Optional extension dependencies can be installed as Python extras:
 
 ```shell
-venv/bin/python -m pip install --editable '.[svg,anthropic]'
+venv/bin/python -m pip install --editable '.[anthropic]'
 ```
 
-Available extras are `svg`, `openai`, `anthropic`, `gemini`, and `mistral`.
-The SVG extra installs a pinned dependency from GitHub and therefore needs Git
-and network access at installation time. SVG rendering is optional; raster
-image conversion and GBPC output do not require it.
+Available extras are `openai`, `anthropic`, `gemini`, and `mistral`.
+SVG rendering uses the distribution-provided `rsvg-convert` utility. RPM
+installations include it automatically. For source installations, install
+`librsvg2-tools` on Fedora/EL or `librsvg2-bin` on Debian/Ubuntu. SVG rendering
+is optional; raster image conversion and GBPC output do not require it.
 
 ## systemd service
 
