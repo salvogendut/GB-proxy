@@ -8,7 +8,16 @@ from unittest import mock
 
 from PIL import Image
 
-from utils.image_utils import GBPC_INKS, encode_gbpc, fetch_and_cache_image, optimize_image
+from utils.image_utils import (
+	GBPC_INKS,
+	GBPC_MODE_1,
+	GBPC_MODE_7,
+	GBPC_MODE7_INKS,
+	GBPC_MODE7_PALETTE,
+	encode_gbpc,
+	fetch_and_cache_image,
+	optimize_image,
+)
 
 
 class GbpcEncodingTests(unittest.TestCase):
@@ -47,6 +56,60 @@ class GbpcEncodingTests(unittest.TestCase):
 		self.assertEqual(struct.unpack("<HH", encoded[6:10]), (4, 1))
 		self.assertEqual(encoded[10:14], GBPC_INKS)
 		self.assertEqual(encoded[14:], b"\x53")
+
+	def test_exact_mode7_header_palette_mapping_and_packing(self):
+		expected_palette = (
+			(0, 0, 146), (255, 255, 255), (0, 0, 0), (255, 0, 0),
+			(0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255),
+			(0, 255, 255), (255, 146, 0), (255, 146, 146), (0, 146, 255),
+			(146, 255, 0), (146, 0, 255), (146, 146, 146), (146, 255, 146),
+		)
+		self.assertEqual(
+			GBPC_MODE7_INKS,
+			bytes((1, 26, 0, 6, 18, 2, 24, 8, 20, 15, 16, 11, 21, 5, 13, 22)),
+		)
+		self.assertEqual(GBPC_MODE7_PALETTE, expected_palette)
+
+		image = Image.new("RGB", (4, 1))
+		image.putdata([
+			GBPC_MODE7_PALETTE[0],
+			GBPC_MODE7_PALETTE[3],
+			GBPC_MODE7_PALETTE[4],
+			GBPC_MODE7_PALETTE[15],
+		])
+		encoded = encode_gbpc(image, dithering="none", mode=GBPC_MODE_7)
+
+		self.assertEqual(encoded[:6], b"GBPC\x02\x07")
+		self.assertEqual(struct.unpack("<HH", encoded[6:10]), (4, 1))
+		self.assertEqual(encoded[10:14], GBPC_INKS)
+		self.assertEqual(encoded[14:], b"\x03\x4f")
+
+	def test_mode7_requires_width_multiple_of_four(self):
+		image = Image.new("RGB", (2, 1), GBPC_MODE7_PALETTE[0])
+
+		with self.assertRaisesRegex(ValueError, "multiple of four"):
+			encode_gbpc(image, dithering="none", mode=GBPC_MODE_7)
+
+	def test_mode7_accepts_geobench_max_dimensions(self):
+		image = Image.new("RGB", (512, 255), GBPC_MODE7_PALETTE[0])
+
+		encoded = encode_gbpc(image, dithering="none", mode=GBPC_MODE_7)
+
+		self.assertEqual(struct.unpack("<HH", encoded[6:10]), (512, 255))
+		self.assertEqual(len(encoded), 14 + (512 // 2) * 255)
+
+	def test_mode7_rejects_geobench_oversize_before_quantizing(self):
+		for size in ((516, 255), (512, 256)):
+			with self.subTest(size=size), mock.patch(
+				"utils.image_utils._quantize_gbpc"
+			) as quantize:
+				with self.assertRaisesRegex(ValueError, "512x255"):
+					encode_gbpc(
+						Image.new("RGB", size),
+						dithering="none",
+						mode=GBPC_MODE_7,
+					)
+				quantize.assert_not_called()
 
 	def test_pic_resize_preserves_aspect_and_multiple_of_four(self):
 		image = Image.new("RGB", (321, 100), (255, 0, 0))
@@ -213,6 +276,30 @@ class GbpcEncodingTests(unittest.TestCase):
 			self.assertNotEqual(first, second)
 			self.assertTrue(os.path.isfile(os.path.join(directory, os.path.basename(first))))
 			self.assertTrue(os.path.isfile(os.path.join(directory, os.path.basename(second))))
+
+	def test_cache_separates_mode1_and_mode7_codecs(self):
+		content = self._png_bytes()
+		with tempfile.TemporaryDirectory() as directory:
+			mode1_url = fetch_and_cache_image(
+				"https://example.com/image.png",
+				content,
+				convert_to="pic",
+				cache_dir=directory,
+				gbpc_mode=GBPC_MODE_1,
+			)
+			mode7_url = fetch_and_cache_image(
+				"https://example.com/image.png",
+				content,
+				convert_to="pic",
+				cache_dir=directory,
+				gbpc_mode=GBPC_MODE_7,
+			)
+
+			self.assertNotEqual(mode1_url, mode7_url)
+			with open(os.path.join(directory, os.path.basename(mode1_url)), "rb") as mode1:
+				self.assertEqual(mode1.read(6), b"GBPC\x02\x01")
+			with open(os.path.join(directory, os.path.basename(mode7_url)), "rb") as mode7:
+				self.assertEqual(mode7.read(6), b"GBPC\x02\x07")
 
 	def test_cache_evicts_oldest_file_at_configured_limit(self):
 		image = Image.new("RGB", (4, 4), (255, 255, 255))

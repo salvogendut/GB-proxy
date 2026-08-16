@@ -31,7 +31,7 @@ def default_cache_dir():
 CACHE_DIR = default_cache_dir()
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
 _cache_locks = tuple(threading.Lock() for _ in range(64))
-_CACHE_FORMAT_VERSION = "3"
+_CACHE_FORMAT_VERSION = "4"
 _RSVG_CONVERT = "/usr/bin/rsvg-convert"
 _SVG_CONVERSION_TIMEOUT = 10
 _SVG_SNIFF_BYTES = 64 * 1024
@@ -44,6 +44,47 @@ GBPC_PALETTE = (
 	(0xFF, 0x00, 0x00),
 )
 GBPC_INKS = bytes((1, 26, 0, 6))
+GBPC_MODE_1 = 1
+GBPC_MODE_7 = 7
+_GBPC_MODE7_MAX_WIDTH = 512
+_GBPC_MODE7_MAX_HEIGHT = 255
+
+# MSX Screen-7 pens 4..15 are fixed by GEOBENCH. Pens 0..3 remain the
+# configurable UI pens stored in the common four-byte GBPC header.
+_MSX_CHANNEL_MID = 146
+_CPC_RGB = (
+	(0, 0, 0),
+	(0, 0, _MSX_CHANNEL_MID),
+	(0, 0, 255),
+	(_MSX_CHANNEL_MID, 0, 0),
+	(_MSX_CHANNEL_MID, 0, _MSX_CHANNEL_MID),
+	(_MSX_CHANNEL_MID, 0, 255),
+	(255, 0, 0),
+	(255, 0, _MSX_CHANNEL_MID),
+	(255, 0, 255),
+	(0, _MSX_CHANNEL_MID, 0),
+	(0, _MSX_CHANNEL_MID, _MSX_CHANNEL_MID),
+	(0, _MSX_CHANNEL_MID, 255),
+	(_MSX_CHANNEL_MID, _MSX_CHANNEL_MID, 0),
+	(_MSX_CHANNEL_MID, _MSX_CHANNEL_MID, _MSX_CHANNEL_MID),
+	(_MSX_CHANNEL_MID, _MSX_CHANNEL_MID, 255),
+	(255, _MSX_CHANNEL_MID, 0),
+	(255, _MSX_CHANNEL_MID, _MSX_CHANNEL_MID),
+	(255, _MSX_CHANNEL_MID, 255),
+	(0, 255, 0),
+	(0, 255, _MSX_CHANNEL_MID),
+	(0, 255, 255),
+	(_MSX_CHANNEL_MID, 255, 0),
+	(_MSX_CHANNEL_MID, 255, _MSX_CHANNEL_MID),
+	(_MSX_CHANNEL_MID, 255, 255),
+	(255, 255, 0),
+	(255, 255, _MSX_CHANNEL_MID),
+	(255, 255, 255),
+)
+GBPC_MODE7_INKS = GBPC_INKS + bytes(
+	(18, 2, 24, 8, 20, 15, 16, 11, 21, 5, 13, 22)
+)
+GBPC_MODE7_PALETTE = tuple(_CPC_RGB[ink] for ink in GBPC_MODE7_INKS)
 _BIT0_FOR_PIXEL = (7, 6, 5, 4)
 _BIT1_FOR_PIXEL = (3, 2, 1, 0)
 _BAYER4 = (
@@ -232,10 +273,10 @@ def _clamp(value):
 	return 0 if value < 0 else 255 if value > 255 else value
 
 
-def _nearest_pen(red, green, blue):
+def _nearest_pen(red, green, blue, palette=GBPC_PALETTE):
 	best_pen = 0
 	best_distance = None
-	for pen, (pal_red, pal_green, pal_blue) in enumerate(GBPC_PALETTE):
+	for pen, (pal_red, pal_green, pal_blue) in enumerate(palette):
 		distance = (pal_red - red) ** 2 + (pal_green - green) ** 2 + (pal_blue - blue) ** 2
 		if best_distance is None or distance < best_distance:
 			best_pen = pen
@@ -243,13 +284,16 @@ def _nearest_pen(red, green, blue):
 	return best_pen
 
 
-def _quantize_gbpc(image, dithering):
+def _quantize_gbpc(image, dithering, palette=GBPC_PALETTE):
 	width, height = image.size
 	pixels = image.load()
 	method = (dithering or "none").lower().replace("-", "").replace("_", "")
 
 	if method in ("none", "off"):
-		return [[_nearest_pen(*pixels[x, y]) for x in range(width)] for y in range(height)]
+		return [
+			[_nearest_pen(*pixels[x, y], palette) for x in range(width)]
+			for y in range(height)
+		]
 
 	if method == "ordered":
 		pens = [[0] * width for _ in range(height)]
@@ -261,6 +305,7 @@ def _quantize_gbpc(image, dithering):
 					_clamp(red + offset),
 					_clamp(green + offset),
 					_clamp(blue + offset),
+					palette,
 				)
 		return pens
 
@@ -281,11 +326,11 @@ def _quantize_gbpc(image, dithering):
 			rv = _clamp(red[y][x])
 			gv = _clamp(green[y][x])
 			bv = _clamp(blue[y][x])
-			pen = _nearest_pen(rv, gv, bv)
+			pen = _nearest_pen(rv, gv, bv, palette)
 			pens[y][x] = pen
-			error_red = rv - GBPC_PALETTE[pen][0]
-			error_green = gv - GBPC_PALETTE[pen][1]
-			error_blue = bv - GBPC_PALETTE[pen][2]
+			error_red = rv - palette[pen][0]
+			error_green = gv - palette[pen][1]
+			error_blue = bv - palette[pen][2]
 			for dx, dy, weight in taps:
 				next_x = x + dx
 				next_y = y + dy
@@ -317,14 +362,44 @@ def _pack_gbpc(pens):
 	return bytes(packed)
 
 
-def encode_gbpc(image, dithering="FLOYDSTEINBERG"):
-	"""Encode an RGB Pillow image as canonical portable GBPC v2 Mode-1 data."""
+def _pack_gbpc_mode7(pens):
+	height = len(pens)
+	width = len(pens[0]) if height else 0
+	if width == 0 or width % 4:
+		raise ValueError("GBPC Mode-7 image width must be a non-zero multiple of four")
+
+	packed = bytearray()
+	for row in pens:
+		for x in range(0, width, 2):
+			packed.append((row[x] << 4) | row[x + 1])
+	return bytes(packed)
+
+
+def _gbpc_codec_identity(mode):
+	if mode == GBPC_MODE_1:
+		return "gbpc-v2-mode1-cpc-palette-v1"
+	if mode == GBPC_MODE_7:
+		return "gbpc-v2-mode7-msx-pal16-v1"
+	raise ValueError(f"Unsupported GBPC mode: {mode}")
+
+
+def encode_gbpc(image, dithering="FLOYDSTEINBERG", mode=GBPC_MODE_1):
+	"""Encode an RGB Pillow image as portable GBPC v2 Mode-1 or Mode-7 data."""
 	width, height = image.size
 	if width > 0xFFFF or height > 0xFFFF:
 		raise ValueError("GBPC dimensions exceed the v2 header limits")
-	pens = _quantize_gbpc(image, dithering)
-	header = b"GBPC" + bytes((2, 1)) + struct.pack("<HH", width, height) + GBPC_INKS
-	return header + _pack_gbpc(pens)
+	_gbpc_codec_identity(mode)
+	if mode == GBPC_MODE_7 and (
+		width > _GBPC_MODE7_MAX_WIDTH or height > _GBPC_MODE7_MAX_HEIGHT
+	):
+		raise ValueError(
+			"GBPC Mode-7 dimensions exceed the GEOBENCH 512x255 limit"
+		)
+	palette = GBPC_MODE7_PALETTE if mode == GBPC_MODE_7 else GBPC_PALETTE
+	pens = _quantize_gbpc(image, dithering, palette)
+	header = b"GBPC" + bytes((2, mode)) + struct.pack("<HH", width, height) + GBPC_INKS
+	bitmap = _pack_gbpc_mode7(pens) if mode == GBPC_MODE_7 else _pack_gbpc(pens)
+	return header + bitmap
 
 
 def _as_rgb(image):
@@ -404,6 +479,7 @@ def _optimize_image(
 	max_image_pixels,
 	svg_timeout,
 	max_intermediate_bytes,
+	gbpc_mode,
 ):
 	target_format = (convert_to or "").lower()
 	image = _open_image(
@@ -429,7 +505,7 @@ def _optimize_image(
 		image = _resize_to_fit(image, fit_width, fit_height, width_multiple)
 
 	if convert and target_format == "pic":
-		return encode_gbpc(image, dithering)
+		return encode_gbpc(image, dithering, mode=gbpc_mode)
 
 	if convert and target_format == "gif":
 		image = image.convert("L")
@@ -449,7 +525,7 @@ def optimize_image(image_data, resize=True, max_width=512, max_height=342,
 				  convert=True, convert_to="gif", dithering="FLOYDSTEINBERG",
 				  max_image_pixels=16 * 1024 * 1024,
 				  svg_timeout=_SVG_CONVERSION_TIMEOUT,
-				  max_intermediate_bytes=None):
+				  max_intermediate_bytes=None, gbpc_mode=GBPC_MODE_1):
 	"""Resize and convert image bytes, preserving legacy behavior on failure."""
 	if max_intermediate_bytes is None:
 		max_intermediate_bytes = max(1024 * 1024, max_image_pixels * 5)
@@ -465,6 +541,7 @@ def optimize_image(image_data, resize=True, max_width=512, max_height=342,
 			max_image_pixels,
 			svg_timeout,
 			max_intermediate_bytes,
+			gbpc_mode,
 		)
 	except Exception as error:
 		LOGGER.warning("Could not optimize image: %s", error)
@@ -479,13 +556,20 @@ def fetch_and_cache_image(url, content=None, resize=True, max_width=512, max_hei
 						 svg_timeout=_SVG_CONVERSION_TIMEOUT,
 						 max_download_bytes=16 * 1024 * 1024,
 						 max_cache_bytes=512 * 1024 * 1024, max_cache_files=4096,
-						 max_image_pixels=16 * 1024 * 1024):
+						 max_image_pixels=16 * 1024 * 1024,
+						 gbpc_mode=GBPC_MODE_1):
 	try:
 		LOGGER.info("Processing image from %s", url.split("?", 1)[0])
 		if min(max_download_bytes, max_cache_bytes, max_cache_files, max_image_pixels) < 1:
 			raise ValueError("Image download, cache, and pixel limits must be positive")
 		cache_dir = os.path.abspath(cache_dir or CACHE_DIR)
 		extension = image_extension(convert, convert_to, url)
+		target_format = (convert_to or "").lower().lstrip(".")
+		codec_identity = (
+			_gbpc_codec_identity(gbpc_mode)
+			if convert and target_format == "pic"
+			else "not-gbpc"
+		)
 		cache_material = "\0".join((
 			_CACHE_FORMAT_VERSION,
 			url,
@@ -496,6 +580,7 @@ def fetch_and_cache_image(url, content=None, resize=True, max_width=512, max_hei
 			str(convert_to),
 			str(dithering),
 			str(max_image_pixels),
+			codec_identity,
 		)).encode("utf-8")
 		if content is not None:
 			cache_material += b"\0" + hashlib.sha256(content).digest()
@@ -550,6 +635,7 @@ def fetch_and_cache_image(url, content=None, resize=True, max_width=512, max_hei
 							max_image_pixels,
 							svg_timeout,
 							min(max_cache_bytes, max(1024 * 1024, max_image_pixels * 5)),
+							gbpc_mode,
 						)
 					except Exception as error:
 						raise ValueError(f"Image conversion failed: {error}") from error

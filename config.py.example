@@ -125,6 +125,8 @@ MAX_IMAGE_HEIGHT = 342 # Only used if RESIZE_IMAGES is True
 CONVERT_IMAGES = True
 CONVERT_IMAGES_TO_FILETYPE = "gif" # Only used if CONVERT_IMAGES is True
 DITHERING_ALGORITHM = "FLOYDSTEINBERG" # Only used if CONVERT_IMAGES is True and CONVERT_IMAGES_TO_FILETYPE == "gif"
+# With "pic" output, clients may advertise X-GBPC: 7,1 for GEOBENCH's
+# 16-colour MSX Screen-7 encoding. Missing or unsupported offers use Mode 1.
 
 # In addition to the default web simulator prompt, add custom instructions to improve compatability with your web browser.
 WEB_SIMULATOR_PROMPT_ADDENDUM = """<formatting>

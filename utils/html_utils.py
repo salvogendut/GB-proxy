@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup, Comment, Doctype
 from bs4.formatter import HTMLFormatter
 from flask import current_app, url_for
 
-from utils.image_utils import fetch_and_cache_image, image_extension
+from utils.image_utils import GBPC_MODE_1, fetch_and_cache_image, image_extension
 from utils.resource_registry import register_resource
 
 
@@ -103,7 +103,7 @@ def _ascii_text(value):
 	return unicodedata.normalize("NFKD", value).encode("ascii", errors="ignore").decode("ascii")
 
 
-def _replace_inline_svgs(soup, short_image_urls):
+def _replace_inline_svgs(soup, short_image_urls, gbpc_mode):
 	for use_tag in list(soup.find_all("use")):
 		attribute = None
 		if "href" in use_tag.attrs:
@@ -161,6 +161,7 @@ def _replace_inline_svgs(soup, short_image_urls):
 				max_cache_bytes=_image_setting("MAX_IMAGE_CACHE_BYTES", 512 * 1024 * 1024),
 				max_cache_files=_image_setting("MAX_IMAGE_CACHE_FILES", 4096),
 				max_image_pixels=_image_setting("MAX_IMAGE_PIXELS", 16 * 1024 * 1024),
+				gbpc_mode=gbpc_mode,
 			)
 			if not cached_url:
 				svg_tag.decompose()
@@ -291,7 +292,7 @@ def transcode_html(document, url=None, whitelisted_domains=None, simplify_html=F
 				  convert_characters=False, conversion_table=None,
 				  allowed_tags=None, allowed_attributes=None,
 				  shorten_link_urls=False, short_image_urls=False, ascii_only=False,
-				  max_image_alt_length=None):
+				  max_image_alt_length=None, gbpc_mode=GBPC_MODE_1):
 	"""Convert an HTML response for the configured legacy client."""
 	if isinstance(document, bytes):
 		document = document.decode("utf-8", errors="replace")
@@ -317,7 +318,7 @@ def transcode_html(document, url=None, whitelisted_domains=None, simplify_html=F
 			for attribute in (attributes_to_strip or ()):
 				tag.attrs.pop(attribute, None)
 
-	_replace_inline_svgs(soup, short_image_urls)
+	_replace_inline_svgs(soup, short_image_urls, gbpc_mode)
 	if short_image_urls:
 		_rewrite_images(soup, base_url, max_image_alt_length)
 	if shorten_link_urls:

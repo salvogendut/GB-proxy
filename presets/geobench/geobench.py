@@ -122,6 +122,8 @@ MAX_IMAGE_WIDTH = 160
 MAX_IMAGE_HEIGHT = 96
 CONVERT_IMAGES = True
 CONVERT_IMAGES_TO_FILETYPE = "pic"
+# BROWSER.APP may advertise X-GBPC: 7,1 while using MSX Screen 7. Mode 1 is the
+# safe default for MSX Screen 6 and clients which do not send the header.
 DITHERING_ALGORITHM = "FLOYDSTEINBERG"
 
 CONVERT_CHARACTERS = True

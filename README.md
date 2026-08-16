@@ -59,12 +59,19 @@ The `geobench` preset:
 - rewrites links and images to short proxy-local tokens;
 - downloads and converts images lazily;
 - bounds images to 160x96 pixels;
-- emits canonical four-colour GBPC v2 Mode-1 `.PIC` data;
+- emits GBPC v2 `.PIC` data, defaulting to canonical four-colour Mode 1;
 - transliterates displayed text to printable 7-bit ASCII;
 - minimizes response headers for constrained parsers.
 
 Short tokens are held in a bounded, expiring in-memory registry. They therefore
 expire after a configured idle period and do not survive a service restart.
+
+When `.PIC` conversion is enabled, a client currently using MSX Screen 7 can
+advertise `X-GBPC: 7,1` on each request. The proxy then returns 16-colour GBPC
+Mode-7 images with the GEOBENCH MSX palette and two pixels per byte. A Mode-6
+client can send `X-GBPC: 1` or omit the header; absent, malformed, and unknown
+offers safely retain the byte-compatible Mode-1 output. `X-GBPC` is consumed by
+the proxy and is not forwarded to upstream websites.
 
 ## Configuration
 
