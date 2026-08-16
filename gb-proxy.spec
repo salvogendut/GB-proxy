@@ -1,5 +1,5 @@
 Name:           gb-proxy
-Version:        0.1.1
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        HTTP proxy for GEOBENCH and other legacy web clients
 
@@ -78,6 +78,10 @@ install -Dpm 0640 config.py.example %{buildroot}%{_sysconfdir}/%{name}/config.py
 
 
 %changelog
+* Sun Aug 16 2026 Salvatore Bognanni <salvogendut@users.noreply.github.com> - 0.2.0-1
+- Negotiate 16-colour GBPC Mode-7 images with MSX Screen-7 clients
+- Preserve portable four-colour Mode 1 for other clients and low-memory fallback
+
 * Tue Jul 14 2026 Salvatore Bognanni <salvogendut@users.noreply.github.com> - 0.1.1-1
 - Render SVG images with the distribution-provided rsvg-convert utility
 - Require the SVG converter for complete image support
