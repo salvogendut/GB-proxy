@@ -73,6 +73,42 @@ client can send `X-GBPC: 1` or omit the header; absent, malformed, and unknown
 offers safely retain the byte-compatible Mode-1 output. `X-GBPC` is consumed by
 the proxy and is not forwarded to upstream websites.
 
+## SymZilla DOX and SGX output
+
+SymZilla support is selected per request and does not require a separate
+GB-proxy preset. The browser requests a DOX representation and advertises the
+active SymbOS screen capability:
+
+```http
+Accept: application/x-symbos-dox
+X-GB-SGX: 0,4
+```
+
+The strict `X-GB-SGX` values are:
+
+- `0,2` for two colours in portable CPC packing;
+- `0,4` for four colours in portable CPC packing;
+- `5,16` for sixteen colours in MSX nibble packing.
+
+SymZilla derives this value from the active screen rather than just the host
+platform. A missing, malformed, or unsupported value safely defaults to
+`0,2`, so CPC and PCW modes are never sent more colours than they advertised.
+
+GB-proxy converts the upstream page into a bounded DOX document containing
+`INFO`, `HEAD`, `TEXT`, `GRPH`, `LINK`, and `ENDF` chunks. Page images are
+downloaded eagerly, resized to at most 160x96, quantized against the fixed
+SymbOS palette, and embedded as extended SGX graphic records. A directly
+requested image is returned as a one-image DOX document. Scripts, active
+content, and unsupported binary response types are not included.
+
+Links use short proxy-local URLs because SymZilla history entries hold 127
+characters. Consequently, `--advertise-host` must be an address reachable from
+the SymbOS machine, and links expire with the same bounded in-memory registry
+used by the GEOBENCH preset. The proprietary request headers are consumed by
+GB-proxy; upstream sites receive a conventional web/image `Accept` value.
+Responses include `Vary: Accept, X-GB-SGX` so caches keep capability variants
+separate.
+
 ## Configuration
 
 The command searches for configuration in this order:

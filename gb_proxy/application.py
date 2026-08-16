@@ -1,5 +1,6 @@
 """Flask application factory for GB-proxy."""
 
+import html
 import importlib
 import os
 import re
@@ -9,8 +10,16 @@ from urllib.parse import urlparse
 
 import requests
 from flask import Flask, Response, abort, current_app, request, send_from_directory
+from werkzeug.exceptions import HTTPException
 from werkzeug.wrappers.response import Response as WerkzeugResponse
 
+from utils.dox_utils import (
+	DOX_MIMETYPE,
+	DoxLimits,
+	build_dox_from_html,
+	build_dox_from_image,
+	parse_sgx_profile,
+)
 from utils.html_utils import transcode_content, transcode_html
 from utils.image_utils import (
 	GBPC_MODE_1,
@@ -21,7 +30,7 @@ from utils.image_utils import (
 	image_mimetype,
 	is_image_url,
 )
-from utils.resource_registry import configure_resources, resolve_resource
+from utils.resource_registry import configure_resources, register_resource, resolve_resource
 from utils.system_utils import ConfigurationError, apply_preset
 
 
@@ -31,6 +40,10 @@ USER_AGENT = (
 )
 _EXTENSION_NAME = re.compile(r"^[A-Za-z0-9_]+$")
 _GBPC_REQUEST_HEADER = "X-GBPC"
+_SGX_REQUEST_HEADER = "X-GB-SGX"
+_STANDARD_UPSTREAM_ACCEPT = (
+	"text/html, application/xhtml+xml, image/*;q=0.8, */*;q=0.1"
+)
 
 
 class UpstreamResponseTooLarge(RuntimeError):
@@ -46,6 +59,7 @@ class ProxyRuntime:
 	session_factory: object
 	request_timeout: tuple
 	max_response_bytes: int
+	dox_limits: DoxLimits
 	extensions: dict
 	domain_to_extension: dict
 	override_extension: str = None
@@ -179,6 +193,14 @@ def create_app(
 		("MAX_IMAGE_CACHE_BYTES", 512 * 1024 * 1024),
 		("MAX_IMAGE_CACHE_FILES", 4096),
 		("MAX_IMAGE_PIXELS", 16 * 1024 * 1024),
+		("MAX_DOX_TEXT_BYTES", 11500),
+		("MAX_DOX_LINKS", 64),
+		("MAX_DOX_GRAPHICS", 8),
+		("MAX_DOX_GRAPHICS_BYTES", 64 * 1024),
+		("MAX_DOX_DOCUMENT_BYTES", 96 * 1024),
+		("MAX_DOX_IMAGE_WIDTH", 160),
+		("MAX_DOX_IMAGE_HEIGHT", 96),
+		("MAX_DOX_URL_BYTES", 127),
 	):
 		_positive_setting(settings, name, default)
 	_positive_setting(settings, "IMAGE_REQUEST_TIMEOUT", 30, float)
@@ -195,6 +217,31 @@ def create_app(
 		raise ConfigurationError(f"Invalid resource registry settings: {error}") from error
 
 	extensions, domain_to_extension = _load_extensions(settings)
+	try:
+		dox_limits = DoxLimits(
+			max_text_bytes=int(getattr(settings, "MAX_DOX_TEXT_BYTES", 11500)),
+			max_links=int(getattr(settings, "MAX_DOX_LINKS", 64)),
+			max_graphics=int(getattr(settings, "MAX_DOX_GRAPHICS", 8)),
+			max_graphics_bytes=int(
+				getattr(settings, "MAX_DOX_GRAPHICS_BYTES", 64 * 1024)
+			),
+			max_document_bytes=int(
+				getattr(settings, "MAX_DOX_DOCUMENT_BYTES", 96 * 1024)
+			),
+			max_image_width=int(getattr(settings, "MAX_DOX_IMAGE_WIDTH", 160)),
+			max_image_height=int(getattr(settings, "MAX_DOX_IMAGE_HEIGHT", 96)),
+			max_image_source_bytes=min(
+				int(getattr(settings, "MAX_IMAGE_DOWNLOAD_BYTES", 16 * 1024 * 1024)),
+				int(getattr(settings, "MAX_INLINE_RESOURCE_BYTES", 2 * 1024 * 1024)),
+			),
+			max_image_pixels=int(
+				getattr(settings, "MAX_IMAGE_PIXELS", 16 * 1024 * 1024)
+			),
+			max_url_bytes=int(getattr(settings, "MAX_DOX_URL_BYTES", 127)),
+		)
+	except ValueError as error:
+		raise ConfigurationError(f"Invalid DOX limits: {error}") from error
+
 	runtime = ProxyRuntime(
 		settings=settings,
 		cache_dir=cache_dir,
@@ -208,6 +255,7 @@ def create_app(
 		max_response_bytes=_positive_setting(
 			settings, "MAX_UPSTREAM_RESPONSE_BYTES", 16 * 1024 * 1024
 		),
+		dox_limits=dox_limits,
 		extensions=extensions,
 		domain_to_extension=domain_to_extension,
 	)
@@ -233,6 +281,28 @@ def _requested_gbpc_mode(runtime):
 	if not parts or any(part not in ("1", "7") for part in parts):
 		return GBPC_MODE_1
 	return GBPC_MODE_7 if parts[0] == "7" else GBPC_MODE_1
+
+
+def _accepts_symbos_dox():
+	"""Return true when DOX is an explicitly accepted representation."""
+	for item in request.headers.get("Accept", "").split(","):
+		parts = [part.strip() for part in item.split(";")]
+		if not parts or parts[0].lower() != DOX_MIMETYPE:
+			continue
+		quality = 1.0
+		for parameter in parts[1:]:
+			if parameter.lower().startswith("q="):
+				try:
+					quality = float(parameter[2:])
+				except ValueError:
+					quality = 0
+		if quality > 0:
+			return True
+	return False
+
+
+def _requested_sgx_profile():
+	return parse_sgx_profile(request.headers.get(_SGX_REQUEST_HEADER))
 
 
 def _cache_image(runtime, url, content=None, gbpc_mode=GBPC_MODE_1):
@@ -339,18 +409,22 @@ def _read_upstream_content(response, limit):
 	return content
 
 
-def _prepare_headers():
+def _prepare_headers(dox_requested=False):
 	headers = {"User-Agent": USER_AGENT}
+	if dox_requested:
+		headers["Accept"] = _STANDARD_UPSTREAM_ACCEPT
 	for name in ("Accept", "Accept-Language", "Referer"):
+		if dox_requested and name == "Accept":
+			continue
 		value = request.headers.get(name)
 		if value:
 			headers[name] = value
 	return headers
 
 
-def _send_request(runtime, url, append_query=False):
+def _send_request(runtime, url, append_query=False, dox_requested=False):
 	kwargs = {
-		"headers": _prepare_headers(),
+		"headers": _prepare_headers(dox_requested=dox_requested),
 		"allow_redirects": True,
 		"timeout": runtime.request_timeout,
 		"stream": True,
@@ -369,26 +443,62 @@ def _send_request(runtime, url, append_query=False):
 		raise
 
 
-def _handle_target_request(runtime, url, append_query=False, gbpc_mode=GBPC_MODE_1):
+def _handle_target_request(
+	runtime,
+	url,
+	append_query=False,
+	gbpc_mode=GBPC_MODE_1,
+	sgx_profile=None,
+):
 	current_app.logger.info("Fetching upstream URL %s", urlparse(url)._replace(query="").geturl())
 	response = None
 	session = None
 	try:
-		response, session = _send_request(runtime, url, append_query=append_query)
+		response, session = _send_request(
+			runtime,
+			url,
+			append_query=append_query,
+			dox_requested=sgx_profile is not None,
+		)
 		content = _read_upstream_content(response, runtime.max_response_bytes)
 		result = (content, response.status_code, dict(response.headers))
-		return _process_response(runtime, result, response.url, gbpc_mode=gbpc_mode)
+		return _process_response(
+			runtime,
+			result,
+			getattr(response, "url", url),
+			gbpc_mode=gbpc_mode,
+			sgx_profile=sgx_profile,
+		)
 	except requests.Timeout:
 		current_app.logger.warning("Upstream request timed out for %s", url)
+		if sgx_profile is not None:
+			return _dox_error_response(
+				runtime, 504, "Upstream timeout", "The remote server did not respond in time.",
+				sgx_profile, url,
+			)
 		return abort(504, "Upstream request timed out")
 	except UpstreamResponseTooLarge as error:
 		current_app.logger.warning("%s", error)
+		if sgx_profile is not None:
+			return _dox_error_response(
+				runtime, 502, "Response too large", str(error), sgx_profile, url,
+			)
 		return abort(502, "Upstream response is too large")
 	except requests.RequestException:
 		current_app.logger.exception("Upstream request failed for %s", url)
+		if sgx_profile is not None:
+			return _dox_error_response(
+				runtime, 502, "Connection failed", "Could not connect to the remote server.",
+				sgx_profile, url,
+			)
 		return abort(502, "Upstream connection failed")
 	except Exception:
 		current_app.logger.exception("Unhandled proxy error for %s", url)
+		if sgx_profile is not None:
+			return _dox_error_response(
+				runtime, 500, "Proxy error", "GB-proxy could not build this page.",
+				sgx_profile, url,
+			)
 		return abort(500, "GB-proxy encountered an internal error")
 	finally:
 		if response is not None and callable(getattr(response, "close", None)):
@@ -397,7 +507,131 @@ def _handle_target_request(runtime, url, append_query=False, gbpc_mode=GBPC_MODE
 			session.close()
 
 
-def _process_response(runtime, response, url, gbpc_mode=GBPC_MODE_1):
+def _fetch_dox_image(runtime, url):
+	parsed = urlparse(url)
+	if parsed.scheme not in ("http", "https") or not parsed.netloc:
+		raise ValueError("DOX image URL must be absolute HTTP or HTTPS")
+	response = None
+	session = None
+	kwargs = {
+		"headers": {"User-Agent": USER_AGENT, "Accept": "image/*"},
+		"allow_redirects": True,
+		"timeout": runtime.request_timeout,
+		"stream": True,
+	}
+	try:
+		if runtime.request_callable is not None:
+			response = runtime.request_callable("GET", url, **kwargs)
+		else:
+			session = runtime.session_factory()
+			response = session.request("GET", url, **kwargs)
+		status = int(getattr(response, "status_code", 200))
+		if status < 200 or status >= 300:
+			raise ValueError(f"Image server returned HTTP {status}")
+		return _read_upstream_content(
+			response,
+			min(
+				runtime.dox_limits.max_image_source_bytes,
+				int(getattr(runtime.settings, "MAX_IMAGE_DOWNLOAD_BYTES", 16 * 1024 * 1024)),
+			),
+		)
+	finally:
+		if response is not None and callable(getattr(response, "close", None)):
+			response.close()
+		if session is not None:
+			session.close()
+
+
+def _dox_response(runtime, content, status_code, content_type, url, profile):
+	settings = runtime.settings
+	arguments = {
+		"profile": profile,
+		"limits": runtime.dox_limits,
+		"dithering": settings.DITHERING_ALGORITHM,
+		"svg_timeout": float(getattr(settings, "SVG_CONVERSION_TIMEOUT", 10)),
+	}
+	media_type = content_type.split(";", 1)[0].strip()
+	binary_without_type = (
+		not media_type
+		and isinstance(content, bytes)
+		and (
+			b"\x00" in content[:4096]
+			or sum(byte < 9 or 13 < byte < 32 for byte in content[:4096])
+			> max(4, len(content[:4096]) // 20)
+		)
+	)
+	if media_type.startswith("image/") or is_image_url(url):
+		document = build_dox_from_image(content, url, **arguments)
+	elif media_type == "text/plain":
+		if isinstance(content, bytes):
+			content = content.decode("utf-8", errors="replace")
+		document = build_dox_from_html(
+			f"<html><head><title>Text document</title></head><body><pre>{html.escape(content)}</pre></body></html>",
+			url,
+			**arguments,
+		)
+	elif binary_without_type or (
+		media_type and media_type not in ("text/html", "application/xhtml+xml")
+	):
+		description = media_type or "unknown binary"
+		return _dox_error_response(
+			runtime,
+			415,
+			"Unsupported content",
+			f"SymZilla cannot display {description} content.",
+			profile,
+			url,
+		)
+	else:
+		document = build_dox_from_html(
+			content,
+			url,
+			image_fetcher=lambda image_url: _fetch_dox_image(runtime, image_url),
+			link_shortener=_shorten_dox_link,
+			**arguments,
+		)
+	return _serialized_dox_response(document, status_code)
+
+
+def _serialized_dox_response(document, status_code):
+	# Werkzeug correctly suppresses bodies (and sometimes entity headers) for
+	# body-forbidden statuses. SymZilla always needs the generated DOX body, so
+	# turn those upstream statuses into a displayable response.
+	if 100 <= int(status_code) < 200 or int(status_code) in (204, 205, 304):
+		status_code = 200
+	result = Response(document, status=status_code, content_type=DOX_MIMETYPE)
+	result.headers["Content-Disposition"] = 'inline; filename="document.dox"'
+	result.vary.add("Accept")
+	result.vary.add(_SGX_REQUEST_HEADER)
+	return result
+
+
+def _shorten_dox_link(target):
+	token = register_resource("url", target)
+	base_url = current_app.config["GB_PROXY_ADVERTISE_URL"].rstrip("/")
+	return f"{base_url}/u/{token}"
+
+
+def _dox_error_response(runtime, status_code, title, message, profile, url):
+	document = build_dox_from_html(
+		("<html><head><title>" + html.escape(title) + "</title></head><body><h1>"
+		 + html.escape(title) + "</h1><p>" + html.escape(message) + "</p></body></html>"),
+		url,
+		profile=profile,
+		limits=runtime.dox_limits,
+		dithering=runtime.settings.DITHERING_ALGORITHM,
+		svg_timeout=float(getattr(runtime.settings, "SVG_CONVERSION_TIMEOUT", 10)),
+	)
+	return _serialized_dox_response(document, status_code)
+
+
+def _process_response(
+	runtime,
+	response,
+	url,
+	gbpc_mode=GBPC_MODE_1,
+	sgx_profile=None,
+):
 	varies_by_gbpc = False
 	if isinstance(response, tuple):
 		if len(response) == 3:
@@ -410,7 +644,11 @@ def _process_response(runtime, response, url, gbpc_mode=GBPC_MODE_1):
 			status_code = 200
 			headers = {}
 	elif isinstance(response, (Response, WerkzeugResponse)):
-		return response
+		if sgx_profile is None:
+			return response
+		content = response.get_data()
+		status_code = response.status_code
+		headers = dict(response.headers)
 	else:
 		content = response
 		status_code = 200
@@ -420,6 +658,15 @@ def _process_response(runtime, response, url, gbpc_mode=GBPC_MODE_1):
 		(value for key, value in headers.items() if key.lower() == "content-type"),
 		"",
 	).lower()
+	if sgx_profile is not None:
+		return _dox_response(
+			runtime,
+			content,
+			status_code,
+			content_type,
+			url,
+			sgx_profile,
+		)
 
 	if content_type.startswith("image/"):
 		cached_url = _cache_image(runtime, url, content, gbpc_mode=gbpc_mode)
@@ -523,6 +770,19 @@ def _process_response(runtime, response, url, gbpc_mode=GBPC_MODE_1):
 
 
 def _register_routes(app, runtime):
+	@app.errorhandler(HTTPException)
+	def handle_http_error(error):
+		if not _accepts_symbos_dox():
+			return error
+		return _dox_error_response(
+			runtime,
+			error.code or 500,
+			error.name,
+			error.description,
+			_requested_sgx_profile(),
+			request.url,
+		)
+
 	@app.get("/cached_image/<path:filename>")
 	def serve_cached_image(filename):
 		return _send_image_file(runtime, filename)
@@ -559,12 +819,14 @@ def _register_routes(app, runtime):
 			resource.target,
 			append_query=True,
 			gbpc_mode=_requested_gbpc_mode(runtime),
+			sgx_profile=_requested_sgx_profile() if _accepts_symbos_dox() else None,
 		)
 
 	@app.route("/", defaults={"path": "/"}, methods=("GET", "POST"))
 	@app.route("/<path:path>", methods=("GET", "POST"))
 	def handle_request(path):
 		gbpc_mode = _requested_gbpc_mode(runtime)
+		sgx_profile = _requested_sgx_profile() if _accepts_symbos_dox() else None
 		parsed_url = urlparse(request.url)
 		override_response = _handle_override_extension(runtime, parsed_url.scheme)
 		if override_response is not None:
@@ -573,6 +835,7 @@ def _register_routes(app, runtime):
 				override_response,
 				request.url,
 				gbpc_mode=gbpc_mode,
+				sgx_profile=sgx_profile,
 			)
 
 		matching_extension = _find_matching_extension(runtime, parsed_url.hostname)
@@ -582,13 +845,15 @@ def _register_routes(app, runtime):
 				_handle_matching_extension(runtime, matching_extension),
 				request.url,
 				gbpc_mode=gbpc_mode,
+				sgx_profile=sgx_profile,
 			)
 
-		if is_image_url(request.url):
+		if sgx_profile is None and is_image_url(request.url):
 			return _handle_image_request(runtime, request.url, gbpc_mode=gbpc_mode)
 		return _handle_target_request(
 			runtime,
 			request.url,
 			append_query=False,
 			gbpc_mode=gbpc_mode,
+			sgx_profile=sgx_profile,
 		)

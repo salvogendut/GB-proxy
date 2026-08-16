@@ -49,6 +49,32 @@ GBPC_MODE_7 = 7
 _GBPC_MODE7_MAX_WIDTH = 512
 _GBPC_MODE7_MAX_HEIGHT = 255
 
+# Fixed SymbOS desktop palette used by the reference gfx2sgx converter. SGX
+# files carry palette indexes rather than palette data, so using these exact
+# colours for quantisation is important for consistent output on all targets.
+SYMBOS_PALETTE = (
+	(0xF7, 0xF7, 0x90),
+	(0x06, 0x06, 0x06),
+	(0xF7, 0x90, 0x06),
+	(0x90, 0x06, 0x06),
+	(0x06, 0xF7, 0xF7),
+	(0x06, 0x06, 0x90),
+	(0x90, 0x90, 0xF7),
+	(0x06, 0x06, 0xF7),
+	(0xF7, 0xF7, 0xF7),
+	(0x06, 0x90, 0x06),
+	(0x06, 0xF7, 0x06),
+	(0xF7, 0x06, 0xF7),
+	(0xF7, 0xF7, 0x06),
+	(0x90, 0x90, 0x90),
+	(0xF9, 0x90, 0x90),
+	(0xF7, 0x06, 0x06),
+)
+SGX_MODE_0 = 0
+SGX_MODE_5 = 5
+_SGX_MAX_DIMENSION = 255
+_SGX_MAX_PAYLOAD_BYTES = 16374
+
 # MSX Screen-7 pens 4..15 are fixed by GEOBENCH. Pens 0..3 remain the
 # configurable UI pens stored in the common four-byte GBPC header.
 _MSX_CHANNEL_MID = 146
@@ -402,6 +428,109 @@ def encode_gbpc(image, dithering="FLOYDSTEINBERG", mode=GBPC_MODE_1):
 	return header + bitmap
 
 
+def _sgx_colour_count(mode, colours):
+	if colours is None:
+		colours = 4 if mode == SGX_MODE_0 else 16
+	if (mode, colours) not in ((SGX_MODE_0, 2), (SGX_MODE_0, 4), (SGX_MODE_5, 16)):
+		raise ValueError(f"Unsupported SGX mode/colour depth: {mode},{colours}")
+	return colours
+
+
+def encode_sgx_pixels(pens, mode=SGX_MODE_0, colours=None):
+	"""Encode palette indexes as one uncompressed extended SymbOS SGX object.
+
+	DOX ``GRPH`` records always use the extended on-disc wrapper, including for
+	four-colour graphics: marker 64, encoding type, three little-endian size
+	words, then the packed bitmap.
+	"""
+	colours = _sgx_colour_count(mode, colours)
+	if not pens or not pens[0]:
+		raise ValueError("Cannot encode an empty SGX image")
+	height = len(pens)
+	width = len(pens[0])
+	if width > _SGX_MAX_DIMENSION or height > _SGX_MAX_DIMENSION:
+		raise ValueError("SGX dimensions exceed SymZilla's 255x255 limit")
+	width_multiple = 8 if mode == SGX_MODE_0 else 4
+	if width % width_multiple:
+		raise ValueError(
+			f"SGX mode {mode} image width must be a multiple of {width_multiple}"
+		)
+	max_pen = colours - 1
+	for row in pens:
+		if len(row) != width:
+			raise ValueError("SGX rows must all have the same width")
+		if any(not isinstance(pen, int) or pen < 0 or pen > max_pen for pen in row):
+			raise ValueError(f"SGX mode {mode} palette indexes must be 0-{max_pen}")
+
+	if mode == SGX_MODE_0:
+		bitmap = _pack_gbpc(pens)
+		width_bytes = width // 4
+	else:
+		bitmap = _pack_gbpc_mode7(pens)
+		width_bytes = width // 2
+	if len(bitmap) > _SGX_MAX_PAYLOAD_BYTES:
+		raise ValueError("SGX bitmap exceeds the SymZilla bank limit")
+	return bytes((0x40, mode)) + struct.pack(
+		"<HHH", width_bytes, width, height
+	) + bitmap
+
+
+def encode_sgx(
+	image,
+	dithering="FLOYDSTEINBERG",
+	mode=SGX_MODE_0,
+	colours=None,
+):
+	"""Encode a Pillow image using the fixed SymbOS 4- or 16-colour palette."""
+	colours = _sgx_colour_count(mode, colours)
+	image = _as_rgb(image)
+	width, height = image.size
+	if width > _SGX_MAX_DIMENSION or height > _SGX_MAX_DIMENSION:
+		raise ValueError("SGX dimensions exceed SymZilla's 255x255 limit")
+	palette = SYMBOS_PALETTE[:colours]
+	pens = _quantize_gbpc(image, dithering, palette)
+	return encode_sgx_pixels(pens, mode=mode, colours=colours)
+
+
+def convert_to_sgx(
+	image_data,
+	*,
+	mode=SGX_MODE_0,
+	colours=None,
+	max_width=160,
+	max_height=96,
+	dithering="FLOYDSTEINBERG",
+	max_image_pixels=16 * 1024 * 1024,
+	svg_timeout=_SVG_CONVERSION_TIMEOUT,
+	max_intermediate_bytes=None,
+):
+	"""Decode, bound, resize, and encode untrusted image bytes as SGX."""
+	colours = _sgx_colour_count(mode, colours)
+	max_width = min(_SGX_MAX_DIMENSION, int(max_width))
+	max_height = min(_SGX_MAX_DIMENSION, int(max_height))
+	if min(max_width, max_height, max_image_pixels) < 1:
+		raise ValueError("SGX image and pixel limits must be positive")
+	if max_intermediate_bytes is None:
+		max_intermediate_bytes = max(1024 * 1024, max_image_pixels * 5)
+	image = _open_image(
+		image_data,
+		resize=True,
+		max_width=max_width,
+		max_height=max_height,
+		max_image_pixels=max_image_pixels,
+		svg_timeout=svg_timeout,
+		max_intermediate_bytes=max_intermediate_bytes,
+	)
+	if image.width * image.height > max_image_pixels:
+		raise ValueError(f"Decoded image exceeds the {max_image_pixels}-pixel limit")
+	image = _as_rgb(image)
+	width_multiple = 8 if mode == SGX_MODE_0 else 4
+	image = _resize_to_fit(
+		image, max_width, max_height, width_multiple=width_multiple
+	)
+	return encode_sgx(image, dithering=dithering, mode=mode, colours=colours)
+
+
 def _as_rgb(image):
 	image.load()
 	if "A" in image.getbands() or "transparency" in image.info:
@@ -431,11 +560,11 @@ def _resize_to_fit(image, max_width, max_height, width_multiple=1):
 
 	target_height = max(1, int(round(height * target_width / width)))
 	if max_height and target_height > max_height:
+		# Extremely narrow inputs may require the minimum encodable row width
+		# while their aspect-ratio height would exceed the target. Keep the
+		# wire-format alignment and both hard bounds; a small amount of
+		# distortion is preferable to emitting dimensions the client cannot load.
 		target_height = max_height
-		target_width = max(1, int(round(width * target_height / height)))
-		if width_multiple > 1:
-			target_width = max(width_multiple, (target_width // width_multiple) * width_multiple)
-		target_height = max(1, int(round(height * target_width / width)))
 
 	if (target_width, target_height) == image.size:
 		return image

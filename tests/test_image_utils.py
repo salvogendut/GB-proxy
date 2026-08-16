@@ -14,7 +14,13 @@ from utils.image_utils import (
 	GBPC_MODE_7,
 	GBPC_MODE7_INKS,
 	GBPC_MODE7_PALETTE,
+	SGX_MODE_0,
+	SGX_MODE_5,
+	SYMBOS_PALETTE,
+	convert_to_sgx,
 	encode_gbpc,
+	encode_sgx,
+	encode_sgx_pixels,
 	fetch_and_cache_image,
 	optimize_image,
 )
@@ -331,6 +337,80 @@ class GbpcEncodingTests(unittest.TestCase):
 
 			self.assertIsNone(cached_url)
 			self.assertEqual(os.listdir(directory), [])
+
+
+class SgxEncodingTests(unittest.TestCase):
+	def test_exact_fixed_symbos_palette(self):
+		self.assertEqual(SYMBOS_PALETTE[:4], (
+			(0xF7, 0xF7, 0x90),
+			(0x06, 0x06, 0x06),
+			(0xF7, 0x90, 0x06),
+			(0x90, 0x06, 0x06),
+		))
+		self.assertEqual(len(SYMBOS_PALETTE), 16)
+
+	def test_exact_four_colour_extended_sgx_vector(self):
+		encoded = encode_sgx_pixels(
+			((0, 1, 2, 3, 3, 2, 1, 0),),
+			mode=SGX_MODE_0,
+			colours=4,
+		)
+
+		self.assertEqual(encoded, bytes.fromhex("400002000800010053ac"))
+
+	def test_exact_two_colour_extended_sgx_vector(self):
+		encoded = encode_sgx_pixels(
+			((0, 1, 0, 1, 1, 0, 1, 0),),
+			mode=SGX_MODE_0,
+			colours=2,
+		)
+
+		self.assertEqual(encoded, bytes.fromhex("400002000800010050a0"))
+
+	def test_exact_sixteen_colour_extended_sgx_vector(self):
+		encoded = encode_sgx_pixels(
+			((0, 5, 10, 15),),
+			mode=SGX_MODE_5,
+			colours=16,
+		)
+
+		self.assertEqual(encoded, bytes.fromhex("400502000400010005af"))
+
+	def test_sgx0_requires_even_row_byte_count(self):
+		with self.assertRaisesRegex(ValueError, "multiple of 8"):
+			encode_sgx_pixels(((0, 1, 2, 3),), mode=SGX_MODE_0, colours=4)
+
+	def test_two_colour_profile_never_emits_higher_palette_indexes(self):
+		image = Image.new("RGB", (8, 1))
+		image.putdata([SYMBOS_PALETTE[index] for index in (0, 1, 2, 3, 8, 9, 14, 15)])
+
+		encoded = encode_sgx(
+			image,
+			dithering="none",
+			mode=SGX_MODE_0,
+			colours=2,
+		)
+
+		# In CPC mode-1 packing, pens 2/3 set one of bits 0-3. A two-colour
+		# quantizer can only set bits 4-7.
+		self.assertEqual(encoded[8] & 0x0F, 0)
+		self.assertEqual(encoded[9] & 0x0F, 0)
+
+	def test_extreme_aspect_ratio_stays_within_sgx_bounds(self):
+		image = Image.new("RGB", (1, 100), SYMBOS_PALETTE[1])
+		buffer = io.BytesIO()
+		image.save(buffer, format="PNG")
+
+		encoded = convert_to_sgx(
+			buffer.getvalue(),
+			mode=SGX_MODE_0,
+			colours=4,
+			max_width=160,
+			max_height=96,
+			dithering="none",
+		)
+
+		self.assertEqual(struct.unpack_from("<HH", encoded, 4), (8, 96))
 
 
 if __name__ == "__main__":
