@@ -241,6 +241,55 @@ class SymzillaDoxApplicationTests(unittest.TestCase):
 		self.assertEqual(calls[0][1], "http://frogfind.au/")
 		self.assertIn(b"FrogFind", validate_dox(response.data)[b"TEXT"])
 
+	def test_request_addressed_to_the_proxy_is_refused_without_upstream_fetch(self):
+		with tempfile.TemporaryDirectory() as directory:
+			calls = []
+
+			def send(method, url, **kwargs):
+				calls.append((method, url, kwargs))
+				return SimpleNamespace(
+					content=b"<html><body>Never</body></html>",
+					status_code=200,
+					headers={"Content-Type": "text/html"},
+					url=url,
+				)
+
+			app = create_app(
+				install_config(),
+				cache_dir=directory,
+				state_dir=directory,
+				advertise_url="http://192.0.2.10:5001",
+				request_callable=send,
+			)
+			response = app.test_client().get("/", base_url="http://192.0.2.10:5001")
+
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(calls, [])
+
+	def test_request_to_loopback_address_is_refused_without_upstream_fetch(self):
+		with tempfile.TemporaryDirectory() as directory:
+			calls = []
+
+			def send(method, url, **kwargs):
+				calls.append((method, url, kwargs))
+				return SimpleNamespace(
+					content=b"<html><body>Never</body></html>",
+					status_code=200,
+					headers={"Content-Type": "text/html"},
+					url=url,
+				)
+
+			app = create_app(
+				install_config(),
+				cache_dir=directory,
+				state_dir=directory,
+				request_callable=send,
+			)
+			response = app.test_client().get("/", base_url="http://127.0.0.1:5001")
+
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(calls, [])
+
 	def test_explicit_accept_selects_dox_and_consumes_capability_headers(self):
 		upstream = SimpleNamespace(
 			content=b"<html><head><title>Test</title></head><body>Hello</body></html>",

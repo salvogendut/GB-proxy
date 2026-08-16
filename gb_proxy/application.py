@@ -50,6 +50,9 @@ class UpstreamResponseTooLarge(RuntimeError):
 	"""Raised when an upstream response exceeds the configured memory bound."""
 
 
+_SELF_HOSTS = frozenset(("localhost", "127.0.0.1", "::1", "[::1]", "waitress.invalid"))
+
+
 class _EmptyPathMiddleware:
 	"""Normalize an origin-only absolute proxy URI before Flask routing."""
 
@@ -63,6 +66,26 @@ class _EmptyPathMiddleware:
 				if name in environ and not environ[name]:
 					environ[name] = "/"
 		return self.application(environ, start_response)
+
+
+def _is_proxy_self_request():
+	"""Return true when the request target is the proxy itself.
+
+	A well-formed proxy request uses an absolute-form target whose authority is
+	the upstream site, so its reconstructed URL never names the proxy. A plain
+	request to the proxy (``GET /``) reconstructs to the proxy's own address;
+	fetching that would connect the proxy to itself and wedge the worker.
+	"""
+	target = urlparse(request.url)
+	host = (target.hostname or "").lower()
+	if not host:
+		return False
+	advertise_host = (
+		urlparse(current_app.config["GB_PROXY_ADVERTISE_URL"]).hostname or ""
+	).lower()
+	if advertise_host and host == advertise_host:
+		return True
+	return host in _SELF_HOSTS
 
 
 @dataclass
@@ -843,6 +866,22 @@ def _register_routes(app, runtime):
 	def handle_request(path):
 		gbpc_mode = _requested_gbpc_mode(runtime)
 		sgx_profile = _requested_sgx_profile() if _accepts_symbos_dox() else None
+		if _is_proxy_self_request():
+			# The request was addressed to the proxy rather than to an upstream
+			# site. Refuse it instead of fetching ourselves recursively.
+			if sgx_profile is not None:
+				return _dox_error_response(
+					runtime,
+					400,
+					"Not a proxy request",
+					"Send an absolute URL through the proxy, for example http://example.com/.",
+					sgx_profile,
+					request.url,
+				)
+			return abort(
+				400,
+				"This is a proxy. Send an absolute URL, for example http://example.com/",
+			)
 		parsed_url = urlparse(request.url)
 		override_response = _handle_override_extension(runtime, parsed_url.scheme)
 		if override_response is not None:
