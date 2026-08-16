@@ -13,6 +13,8 @@ from werkzeug.wrappers.response import Response as WerkzeugResponse
 
 from utils.html_utils import transcode_content, transcode_html
 from utils.image_utils import (
+	GBPC_MODE_1,
+	GBPC_MODE_7,
 	default_cache_dir,
 	fetch_and_cache_image,
 	image_extension,
@@ -28,6 +30,7 @@ USER_AGENT = (
 	"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
 )
 _EXTENSION_NAME = re.compile(r"^[A-Za-z0-9_]+$")
+_GBPC_REQUEST_HEADER = "X-GBPC"
 
 
 class UpstreamResponseTooLarge(RuntimeError):
@@ -213,7 +216,26 @@ def create_app(
 	return app
 
 
-def _cache_image(runtime, url, content=None):
+def _pic_output_enabled(runtime):
+	settings = runtime.settings
+	return bool(settings.CONVERT_IMAGES) and image_extension(
+		settings.CONVERT_IMAGES,
+		settings.CONVERT_IMAGES_TO_FILETYPE,
+	) == "pic"
+
+
+def _requested_gbpc_mode(runtime):
+	"""Select the first advertised supported GBPC mode, defaulting safely."""
+	if not _pic_output_enabled(runtime):
+		return GBPC_MODE_1
+	offer = request.headers.get(_GBPC_REQUEST_HEADER, "")
+	parts = tuple(part.strip() for part in offer.split(","))
+	if not parts or any(part not in ("1", "7") for part in parts):
+		return GBPC_MODE_1
+	return GBPC_MODE_7 if parts[0] == "7" else GBPC_MODE_1
+
+
+def _cache_image(runtime, url, content=None, gbpc_mode=GBPC_MODE_1):
 	settings = runtime.settings
 	return fetch_and_cache_image(
 		url,
@@ -233,6 +255,7 @@ def _cache_image(runtime, url, content=None):
 		max_cache_bytes=int(getattr(settings, "MAX_IMAGE_CACHE_BYTES", 512 * 1024 * 1024)),
 		max_cache_files=int(getattr(settings, "MAX_IMAGE_CACHE_FILES", 4096)),
 		max_image_pixels=int(getattr(settings, "MAX_IMAGE_PIXELS", 16 * 1024 * 1024)),
+		gbpc_mode=gbpc_mode,
 	)
 
 
@@ -251,11 +274,14 @@ def _send_image_file(runtime, filename):
 
 
 def _send_cached_image(runtime, cached_url):
-	return _send_image_file(runtime, os.path.basename(cached_url))
+	response = _send_image_file(runtime, os.path.basename(cached_url))
+	if _pic_output_enabled(runtime):
+		response.vary.add(_GBPC_REQUEST_HEADER)
+	return response
 
 
-def _handle_image_request(runtime, url):
-	cached_url = _cache_image(runtime, url)
+def _handle_image_request(runtime, url, gbpc_mode=GBPC_MODE_1):
+	cached_url = _cache_image(runtime, url, gbpc_mode=gbpc_mode)
 	if cached_url:
 		return _send_cached_image(runtime, cached_url)
 	return abort(404, "Image not found or could not be processed")
@@ -343,7 +369,7 @@ def _send_request(runtime, url, append_query=False):
 		raise
 
 
-def _handle_target_request(runtime, url, append_query=False):
+def _handle_target_request(runtime, url, append_query=False, gbpc_mode=GBPC_MODE_1):
 	current_app.logger.info("Fetching upstream URL %s", urlparse(url)._replace(query="").geturl())
 	response = None
 	session = None
@@ -351,7 +377,7 @@ def _handle_target_request(runtime, url, append_query=False):
 		response, session = _send_request(runtime, url, append_query=append_query)
 		content = _read_upstream_content(response, runtime.max_response_bytes)
 		result = (content, response.status_code, dict(response.headers))
-		return _process_response(runtime, result, response.url)
+		return _process_response(runtime, result, response.url, gbpc_mode=gbpc_mode)
 	except requests.Timeout:
 		current_app.logger.warning("Upstream request timed out for %s", url)
 		return abort(504, "Upstream request timed out")
@@ -371,7 +397,8 @@ def _handle_target_request(runtime, url, append_query=False):
 			session.close()
 
 
-def _process_response(runtime, response, url):
+def _process_response(runtime, response, url, gbpc_mode=GBPC_MODE_1):
+	varies_by_gbpc = False
 	if isinstance(response, tuple):
 		if len(response) == 3:
 			content, status_code, headers = response
@@ -395,7 +422,7 @@ def _process_response(runtime, response, url):
 	).lower()
 
 	if content_type.startswith("image/"):
-		cached_url = _cache_image(runtime, url, content)
+		cached_url = _cache_image(runtime, url, content, gbpc_mode=gbpc_mode)
 		if cached_url:
 			return _send_cached_image(runtime, cached_url)
 		return abort(404, "Image could not be processed")
@@ -446,6 +473,7 @@ def _process_response(runtime, response, url):
 		if isinstance(content, bytes):
 			content = content.decode("utf-8", errors="replace")
 		settings = runtime.settings
+		short_image_urls = getattr(settings, "SHORT_IMAGE_URLS", False)
 		content = transcode_html(
 			content,
 			url,
@@ -459,10 +487,12 @@ def _process_response(runtime, response, url):
 			allowed_tags=getattr(settings, "ALLOWED_HTML_TAGS", None),
 			allowed_attributes=getattr(settings, "ALLOWED_HTML_ATTRIBUTES", None),
 			shorten_link_urls=getattr(settings, "SHORTEN_LINK_URLS", False),
-			short_image_urls=getattr(settings, "SHORT_IMAGE_URLS", False),
+			short_image_urls=short_image_urls,
 			ascii_only=getattr(settings, "ASCII_ONLY", False),
 			max_image_alt_length=getattr(settings, "MAX_IMAGE_ALT_LENGTH", None),
+			gbpc_mode=gbpc_mode,
 		)
+		varies_by_gbpc = _pic_output_enabled(runtime) and not short_image_urls
 
 	result = Response(content, status_code)
 	ignored_headers = {
@@ -487,6 +517,8 @@ def _process_response(runtime, response, url):
 		if getattr(runtime.settings, "MINIMAL_RESPONSE_HEADERS", False) and lower_key not in minimal_headers:
 			continue
 		result.headers[key] = value
+	if varies_by_gbpc:
+		result.vary.add(_GBPC_REQUEST_HEADER)
 	return result
 
 
@@ -497,6 +529,7 @@ def _register_routes(app, runtime):
 
 	@app.get("/i/<token>.<extension>")
 	def serve_short_image(token, extension):
+		gbpc_mode = _requested_gbpc_mode(runtime)
 		expected_extension = image_extension(
 			runtime.settings.CONVERT_IMAGES,
 			runtime.settings.CONVERT_IMAGES_TO_FILETYPE,
@@ -506,7 +539,12 @@ def _register_routes(app, runtime):
 		resource = resolve_resource("image", token)
 		if resource is None:
 			return abort(404, "Image token has expired")
-		cached_url = _cache_image(runtime, resource.target, resource.content)
+		cached_url = _cache_image(
+			runtime,
+			resource.target,
+			resource.content,
+			gbpc_mode=gbpc_mode,
+		)
 		if not cached_url:
 			return abort(404, "Image could not be processed")
 		return _send_cached_image(runtime, cached_url)
@@ -516,15 +554,26 @@ def _register_routes(app, runtime):
 		resource = resolve_resource("url", token)
 		if resource is None:
 			return abort(404, "Link token has expired")
-		return _handle_target_request(runtime, resource.target, append_query=True)
+		return _handle_target_request(
+			runtime,
+			resource.target,
+			append_query=True,
+			gbpc_mode=_requested_gbpc_mode(runtime),
+		)
 
 	@app.route("/", defaults={"path": "/"}, methods=("GET", "POST"))
 	@app.route("/<path:path>", methods=("GET", "POST"))
 	def handle_request(path):
+		gbpc_mode = _requested_gbpc_mode(runtime)
 		parsed_url = urlparse(request.url)
 		override_response = _handle_override_extension(runtime, parsed_url.scheme)
 		if override_response is not None:
-			return _process_response(runtime, override_response, request.url)
+			return _process_response(
+				runtime,
+				override_response,
+				request.url,
+				gbpc_mode=gbpc_mode,
+			)
 
 		matching_extension = _find_matching_extension(runtime, parsed_url.hostname)
 		if matching_extension:
@@ -532,8 +581,14 @@ def _register_routes(app, runtime):
 				runtime,
 				_handle_matching_extension(runtime, matching_extension),
 				request.url,
+				gbpc_mode=gbpc_mode,
 			)
 
 		if is_image_url(request.url):
-			return _handle_image_request(runtime, request.url)
-		return _handle_target_request(runtime, request.url, append_query=False)
+			return _handle_image_request(runtime, request.url, gbpc_mode=gbpc_mode)
+		return _handle_target_request(
+			runtime,
+			request.url,
+			append_query=False,
+			gbpc_mode=gbpc_mode,
+		)
