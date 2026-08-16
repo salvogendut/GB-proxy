@@ -206,6 +206,41 @@ class SymzillaDoxApplicationTests(unittest.TestCase):
 			)
 			return response, calls
 
+	def test_origin_only_absolute_uri_is_handled_without_a_flask_redirect(self):
+		calls = []
+		upstream = SimpleNamespace(
+			content=b"<html><body>FrogFind</body></html>",
+			status_code=200,
+			headers={"Content-Type": "text/html"},
+			url="http://frogfind.au/",
+		)
+
+		with tempfile.TemporaryDirectory() as directory:
+			def send(method, url, **kwargs):
+				calls.append((method, url, kwargs))
+				return upstream
+
+			app = create_app(
+				install_config(),
+				cache_dir=directory,
+				state_dir=directory,
+				request_callable=send,
+			)
+			response = app.test_client().open(
+				"http://frogfind.au",
+				headers={
+					"Accept": DOX_MIMETYPE,
+					"X-GB-SGX": "5,16",
+				},
+				follow_redirects=False,
+			)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.content_type, DOX_MIMETYPE)
+		self.assertNotIn("Location", response.headers)
+		self.assertEqual(calls[0][1], "http://frogfind.au/")
+		self.assertIn(b"FrogFind", validate_dox(response.data)[b"TEXT"])
+
 	def test_explicit_accept_selects_dox_and_consumes_capability_headers(self):
 		upstream = SimpleNamespace(
 			content=b"<html><head><title>Test</title></head><body>Hello</body></html>",

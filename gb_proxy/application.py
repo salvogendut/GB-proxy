@@ -50,6 +50,21 @@ class UpstreamResponseTooLarge(RuntimeError):
 	"""Raised when an upstream response exceeds the configured memory bound."""
 
 
+class _EmptyPathMiddleware:
+	"""Normalize an origin-only absolute proxy URI before Flask routing."""
+
+	def __init__(self, application):
+		self.application = application
+
+	def __call__(self, environ, start_response):
+		if not environ.get("PATH_INFO"):
+			environ["PATH_INFO"] = "/"
+			for name in ("RAW_URI", "REQUEST_URI"):
+				if name in environ and not environ[name]:
+					environ[name] = "/"
+		return self.application(environ, start_response)
+
+
 @dataclass
 class ProxyRuntime:
 	settings: object
@@ -171,6 +186,7 @@ def create_app(
 	os.makedirs(state_dir, exist_ok=True)
 
 	app = Flask(__name__)
+	app.wsgi_app = _EmptyPathMiddleware(app.wsgi_app)
 	_copy_settings_to_app(app, settings)
 	app.config.update(
 		GB_PROXY_CACHE_DIR=cache_dir,
