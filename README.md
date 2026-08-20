@@ -195,6 +195,20 @@ spectool -g -R gb-proxy.spec
 rpmbuild -ba gb-proxy.spec
 ```
 
+GitHub Actions also builds an RPM and source RPM for pushes to `master` and
+pull requests targeting `master`. Pushing a version tag creates or updates the
+corresponding GitHub Release and attaches both RPMs plus `SHA256SUMS`:
+
+```shell
+git tag -a v0.2.0 -m "GB-proxy 0.2.0"
+git push origin v0.2.0
+```
+
+The tag must have the form `vN.N.N` and match the versions in
+`gb-proxy.spec`, `setup.cfg`, `gb_proxy/__init__.py`, and the manual page.
+Release RPMs are currently unsigned; their SHA-256 digests are published for
+integrity checking.
+
 RPM builds are offline after the declared sources and distribution packages
 have been obtained. Dependencies are never downloaded by the service.
 
