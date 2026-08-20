@@ -47,6 +47,20 @@ RESOURCE_MAX_ENTRIES = 4096  # Per resource type (links and images)
 RESOURCE_TTL_SECONDS = 3600
 NOTYOUTUBE_TIMEOUT = 600
 
+# SymZilla DOX output limits. These defaults stay below the application's
+# fixed TEXT area, byte-sized graphic dimensions, bank size, URL history, and
+# safe graphic-count bounds. Raising them beyond the documented loader limits
+# is rejected at startup. DOX image source data is also bounded by the smaller
+# of MAX_IMAGE_DOWNLOAD_BYTES and MAX_INLINE_RESOURCE_BYTES.
+MAX_DOX_TEXT_BYTES = 11500
+MAX_DOX_LINKS = 64
+MAX_DOX_GRAPHICS = 8
+MAX_DOX_GRAPHICS_BYTES = 64 * 1024
+MAX_DOX_DOCUMENT_BYTES = 96 * 1024
+MAX_DOX_IMAGE_WIDTH = 160
+MAX_DOX_IMAGE_HEIGHT = 96
+MAX_DOX_URL_BYTES = 127
+
 # While SIMPLIFY_HTML is True, you can use WHITELISTED_DOMAINS to disable post-processing for
 # specific sites (only perform HTTPS -> HTTP conversion and character conversion (if CONVERT_CHARACTERS is True),
 # without otherwise modifying the page's source code).
