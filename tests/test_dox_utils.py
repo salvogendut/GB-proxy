@@ -35,6 +35,57 @@ def _serialized_chunk(document, name):
 	return None
 
 
+def _replace_chunk(document, name, payload):
+	result = bytearray()
+	offset = 0
+	while offset < len(document):
+		length = struct.unpack_from("<I", document, offset + 4)[0]
+		end = offset + 8 + length
+		if document[offset:offset + 4] == name:
+			result.extend(name + struct.pack("<I", len(payload)) + payload)
+		else:
+			result.extend(document[offset:end])
+		offset = end
+	return bytes(result)
+
+
+def _without_chunk(document, name):
+	result = bytearray()
+	offset = 0
+	while offset < len(document):
+		length = struct.unpack_from("<I", document, offset + 4)[0]
+		end = offset + 8 + length
+		if document[offset:offset + 4] != name:
+			result.extend(document[offset:end])
+		offset = end
+	return bytes(result)
+
+
+def _insert_before_end(document, name, payload):
+	end_chunk = _serialized_chunk(document, b"ENDF")
+	return document[:-len(end_chunk)] + name + struct.pack("<I", len(payload)) + payload + end_chunk
+
+
+def _ctrl_records(payload):
+	control_length, string_length = struct.unpack_from("<HH", payload)
+	control_section = payload[4:4 + control_length]
+	string_section = payload[4 + control_length:4 + control_length + string_length]
+	count = control_section[0]
+	lengths = struct.unpack_from(f"<{count}H", control_section, 1) if count else ()
+	offset = 1 + count * 2
+	controls = []
+	for length in lengths:
+		controls.append(control_section[offset:offset + length])
+		offset += length
+	strings = []
+	offset = 0
+	while struct.unpack_from("<H", string_section, offset)[0]:
+		length = struct.unpack_from("<H", string_section, offset)[0]
+		strings.append(string_section[offset + 2:offset + length])
+		offset += length
+	return controls, strings
+
+
 class SgxProfileTests(unittest.TestCase):
 	def test_strict_supported_profiles(self):
 		self.assertEqual(parse_sgx_profile("0,2"), SgxProfile(0, 2))
@@ -242,6 +293,247 @@ class DoxSerializationTests(unittest.TestCase):
 		text = validate_dox(document, limits=limits)[b"TEXT"]
 
 		self.assertTrue(text.endswith(b"\x04\x02\x01\x01\x00\xff"))
+
+	def test_frogfind_get_form_has_exact_bounded_ctrl_records(self):
+		actions = []
+		document = build_dox_from_html(
+			("<form action='/' method='get'>Leap to: "
+			 "<input type='text' size='30' name='q'>"
+			 "<input type='submit' value='Ribbbit!'>"
+			 "<input type='radio' name='region' value='au-en' checked> Australia"
+			 "</form>"),
+			"http://frogfind.au/",
+			link_shortener=lambda action: actions.append(action) or "http://proxy/u/frog",
+		)
+		chunks = validate_dox(document)
+		controls, strings = _ctrl_records(chunks[b"CTRL"])
+
+		self.assertEqual(actions, ["http://frogfind.au/?region=au-en"])
+		self.assertEqual(controls, [
+			bytes((1, 32, 160, 12)) + struct.pack("<HHB", 1, 2, 63),
+			bytes((1, 16, 80, 12)) + struct.pack("<HH", 0xffff, 3),
+		])
+		self.assertEqual(strings[0], b"q\x00")
+		self.assertEqual(strings[1], b"\x00" * 64)
+		self.assertEqual(strings[2], b"Ribbbit!\x00")
+		self.assertEqual(
+			chunks[b"TEXT"].count(bytes((10, 7, 1)) + bytes.fromhex("8000010501")),
+			1,
+		)
+		self.assertEqual(
+			chunks[b"TEXT"].count(bytes((10, 7, 2)) + bytes.fromhex("8000010501")),
+			1,
+		)
+
+	def test_text_defaults_get_independent_padded_mutable_buffers(self):
+		document = build_dox_from_html(
+			("<form action='/find'>"
+			 "<input name='q' maxlength='10' value='retro'>"
+			 "<input name='again' maxlength='10' value='retro'>"
+			 "</form>"),
+			"https://example.com/",
+			link_shortener=lambda _action: "http://proxy/u/find",
+		)
+		controls, strings = _ctrl_records(validate_dox(document)[b"CTRL"])
+		first_value_id = struct.unpack_from("<H", controls[0], 6)[0]
+		second_value_id = struct.unpack_from("<H", controls[1], 6)[0]
+
+		self.assertNotEqual(first_value_id, second_value_id)
+		self.assertEqual(strings[first_value_id - 1], b"retro" + b"\x00" * 6)
+		self.assertEqual(strings[second_value_id - 1], b"retro" + b"\x00" * 6)
+
+	def test_forms_with_same_action_keep_distinct_link_identity(self):
+		actions = []
+		document = build_dox_from_html(
+			("<form action='/find'><input name='one'></form>"
+			 "<form action='/find'><input name='two'></form>"),
+			"https://example.com/",
+			link_shortener=lambda action: actions.append(action) or "http://proxy/u/same",
+		)
+		chunks = validate_dox(document)
+		controls, _strings = _ctrl_records(chunks[b"CTRL"])
+
+		self.assertEqual(actions, ["https://example.com/find", "https://example.com/find"])
+		self.assertEqual(chunks[b"LINK"][0], 2)
+		self.assertEqual([control[0] for control in controls], [1, 2])
+
+	def test_static_get_defaults_are_folded_into_the_action(self):
+		actions = []
+		document = build_dox_from_html(
+			("<form action='/find?source=gb#ignored'>"
+			 "<input type='hidden' name='tag' value='one'>"
+			 "<input type='hidden' name='tag' value='two'>"
+			 "<input type='radio' name='region' value='au-en' checked>"
+			 "<input type='checkbox' name='images' value='yes'>"
+			 "<input name='q'><button>Search</button></form>"),
+			"https://example.com/page",
+			link_shortener=lambda action: actions.append(action) or "http://proxy/u/find",
+		)
+		chunks = validate_dox(document)
+		controls, _strings = _ctrl_records(chunks[b"CTRL"])
+
+		self.assertEqual(actions, [
+			"https://example.com/find?source=gb&tag=one&tag=two&region=au-en"
+		])
+		self.assertEqual([control[1] for control in controls], [32, 16])
+
+	def test_unsupported_or_over_limit_forms_do_not_register_action_links(self):
+		for html, limits in (
+			("<form method='post'><input name='q'><button>Go</button></form>", DoxLimits()),
+			("<form><input name='q'><button>Go</button></form>", DoxLimits(max_controls=1)),
+			(
+				"<form><input name='q' maxlength='5'></form>",
+				DoxLimits(max_control_bytes=40),
+			),
+			(
+				("<form><input name='q'><input type='password' name='secret'>"
+				 "<button>Go</button></form>"),
+				DoxLimits(),
+			),
+			(
+				"<form><input name='q'><button name='go' value='yes'>Go</button></form>",
+				DoxLimits(),
+			),
+			(
+				"<form><input name='q'><select name='region'><option>AU</option></select></form>",
+				DoxLimits(),
+			),
+			(
+				"<form><input name='q'><button formmethod='post'>Go</button></form>",
+				DoxLimits(),
+			),
+			(
+				"<form action='/" + "x" * 2100 + "'><input name='q'></form>",
+				DoxLimits(),
+			),
+		):
+			with self.subTest(html=html):
+				actions = []
+				document = build_dox_from_html(
+					html,
+					"http://example.com/",
+					limits=limits,
+					link_shortener=lambda action: actions.append(action) or "http://proxy/u/x",
+				)
+				chunks = validate_dox(document, limits=limits)
+				self.assertNotIn(b"CTRL", chunks)
+				self.assertEqual(chunks[b"LINK"][0], 0)
+				self.assertEqual(actions, [])
+
+	def test_controls_inside_removed_ancestors_do_not_leave_marker_reservations(self):
+		document = build_dox_from_html(
+			("<form><template><input name='removed'></template>"
+			 "<input name='kept' maxlength='5'></form>"),
+			"http://example.com/",
+			link_shortener=lambda _action: "http://proxy/u/x",
+		)
+		controls, strings = _ctrl_records(validate_dox(document)[b"CTRL"])
+
+		self.assertEqual(len(controls), 1)
+		self.assertIn(b"kept\x00", strings)
+		self.assertNotIn(b"removed\x00", strings)
+
+	def test_legacy_document_and_canonical_empty_ctrl_are_both_valid(self):
+		document = build_dox_from_html("<p>legacy</p>", "http://example.com/")
+		self.assertNotIn(b"CTRL", validate_dox(document))
+
+		empty_ctrl = bytes.fromhex("01000200000000")
+		with_ctrl = _insert_before_end(document, b"CTRL", empty_ctrl)
+		self.assertEqual(validate_dox(with_ctrl)[b"CTRL"], empty_ctrl)
+
+	def test_validator_rejects_malformed_ctrl_sections_records_strings_and_markers(self):
+		document = build_dox_from_html(
+			"<form><input name='q' maxlength='5' value='x'></form>",
+			"http://example.com/",
+			link_shortener=lambda _action: "http://proxy/u/x",
+		)
+		chunks = validate_dox(document)
+		ctrl = chunks[b"CTRL"]
+		control_length = struct.unpack_from("<H", ctrl)[0]
+		control_offset = 4 + 1 + 2
+
+		bad_type = bytearray(ctrl)
+		bad_type[control_offset + 1] = 99
+		bad_padding = bytearray(ctrl)
+		bad_padding[-3] = ord("X")
+		bad_length = bytearray(ctrl)
+		bad_length[:2] = struct.pack("<H", control_length + 1)
+		missing_string_terminator = bytearray(ctrl[:-2])
+		string_length = struct.unpack_from("<H", ctrl, 2)[0]
+		missing_string_terminator[2:4] = struct.pack("<H", string_length - 2)
+		for payload, message in (
+			(b"\x00\x00\x00", "section lengths"),
+			(bytes(bad_length), "section lengths"),
+			(bytes(bad_type), "Unsupported CTRL"),
+			(bytes(bad_padding), "padding"),
+			(bytes(missing_string_terminator), "missing its terminator"),
+		):
+			with self.subTest(message=message), self.assertRaisesRegex(
+				DoxValidationError, message
+			):
+				validate_dox(_replace_chunk(document, b"CTRL", payload))
+
+		with self.assertRaisesRegex(DoxValidationError, "without a CTRL chunk"):
+			validate_dox(_without_chunk(document, b"CTRL"))
+		malformed_marker = _replace_chunk(
+			document,
+			b"TEXT",
+			chunks[b"TEXT"].replace(bytes.fromhex("0a07018000010501"), bytes.fromhex("0a07018000010502")),
+		)
+		with self.assertRaisesRegex(DoxValidationError, "Malformed CTRL marker"):
+			validate_dox(malformed_marker)
+		wrong_marker_id = _replace_chunk(
+			document,
+			b"TEXT",
+			chunks[b"TEXT"].replace(bytes.fromhex("0a0701"), bytes.fromhex("0a0700")),
+		)
+		with self.assertRaisesRegex(DoxValidationError, "do not match"):
+			validate_dox(wrong_marker_id)
+
+	def test_validator_rejects_invalid_ctrl_cross_references_and_working_size(self):
+		document = build_dox_from_html(
+			"<form><input name='q' maxlength='5' value='x'></form>",
+			"http://example.com/",
+			link_shortener=lambda _action: "http://proxy/u/x",
+		)
+		chunks = validate_dox(document)
+		ctrl = chunks[b"CTRL"]
+		control_length = struct.unpack_from("<H", ctrl)[0]
+		control_offset = 7
+		string_offset = 4 + control_length
+
+		bad_action = bytearray(ctrl)
+		bad_action[control_offset] = 0
+		bad_name = bytearray(ctrl)
+		bad_name[control_offset + 4:control_offset + 6] = b"\x00\x00"
+		bad_capacity = bytearray(ctrl)
+		bad_capacity[control_offset + 8] = 6
+		bad_string_length = bytearray(ctrl)
+		bad_string_length[string_offset:string_offset + 2] = b"\x02\x00"
+		bad_ascii = bytearray(ctrl)
+		bad_ascii[string_offset + 2] = 1
+		for payload, message in (
+			(bytes(bad_action), "action link"),
+			(bytes(bad_name), "name string reference"),
+			(bytes(bad_capacity), "wrong capacity"),
+			(bytes(bad_string_length), "too short"),
+			(bytes(bad_ascii), "printable ASCII"),
+		):
+			with self.subTest(message=message), self.assertRaisesRegex(
+				DoxValidationError, message
+			):
+				validate_dox(_replace_chunk(document, b"CTRL", payload))
+
+		post_links = bytearray(chunks[b"LINK"])
+		post_links[3] = 1
+		with self.assertRaisesRegex(DoxValidationError, "must use GET"):
+			validate_dox(_replace_chunk(document, b"LINK", bytes(post_links)))
+		with self.assertRaisesRegex(DoxValidationError, "working allocation"):
+			validate_dox(document, limits=DoxLimits(max_control_bytes=40))
+
+		duplicate_ctrl = _insert_before_end(document, b"CTRL", ctrl)
+		with self.assertRaisesRegex(DoxValidationError, "Duplicate DOX chunk CTRL"):
+			validate_dox(duplicate_ctrl)
 
 	def test_validator_rejects_corrupt_chunk_length(self):
 		document = bytearray(build_dox_from_html("<p>ok</p>", "http://example.com/"))

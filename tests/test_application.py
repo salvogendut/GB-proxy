@@ -156,6 +156,9 @@ class ApplicationFactoryTests(unittest.TestCase):
 			("MAX_DOX_TEXT_BYTES", 11765),
 			("MAX_DOX_GRAPHICS", 128),
 			("MAX_DOX_GRAPHICS_BYTES", 39),
+			("MAX_DOX_CONTROLS", 17),
+			("MAX_DOX_CONTROL_BYTES", 6),
+			("MAX_DOX_CONTROL_BYTES", 2 * 1024 + 1),
 			("MAX_DOX_IMAGE_WIDTH", 7),
 			("MAX_DOX_IMAGE_HEIGHT", 255),
 			("MAX_DOX_DOCUMENT_BYTES", 1000),
@@ -423,6 +426,32 @@ class SymzillaDoxApplicationTests(unittest.TestCase):
 		self.assertEqual(
 			resolve_resource("url", token).target,
 			"https://destination.example/a/very/long/path?query=abcdefghijklmnopqrstuvwxyz",
+		)
+
+	def test_get_form_action_is_shortened_with_static_defaults_intact(self):
+		upstream = SimpleNamespace(
+			content=(
+				b"<html><body><form action='/find?source=gb' method='get'>"
+				b"<input type='hidden' name='region' value='au-en'>"
+				b"<input type='search' name='q'><input type='submit' value='Ribbbit!'>"
+				b"</form></body></html>"
+			),
+			status_code=200,
+			headers={"Content-Type": "text/html"},
+			url="https://frogfind.au/",
+		)
+		response, _ = self._request(upstream, headers={"Accept": DOX_MIMETYPE})
+		chunks = validate_dox(response.data)
+		links = chunks[b"LINK"]
+		entry_length = struct.unpack_from("<H", links, 1)[0]
+		action_url = links[4:3 + entry_length].rstrip(b"\x00").decode("ascii")
+		token = action_url.rsplit("/", 1)[-1]
+
+		self.assertIn(b"CTRL", chunks)
+		self.assertTrue(action_url.startswith("http://127.0.0.1:5001/u/"))
+		self.assertEqual(
+			resolve_resource("url", token).target,
+			"https://frogfind.au/find?source=gb&region=au-en",
 		)
 
 	def test_binary_content_returns_a_negotiated_dox_error(self):

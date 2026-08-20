@@ -95,11 +95,18 @@ platform. A missing, malformed, or unsupported value safely defaults to
 `0,2`, so CPC and PCW modes are never sent more colours than they advertised.
 
 GB-proxy converts the upstream page into a bounded DOX document containing
-`INFO`, `HEAD`, `TEXT`, `GRPH`, `LINK`, and `ENDF` chunks. Page images are
+`INFO`, `HEAD`, `TEXT`, `GRPH`, `LINK`, and `ENDF` chunks, plus an optional
+`CTRL` chunk when usable forms are present. Page images are
 downloaded eagerly, resized to at most 160x96, quantized against the fixed
 SymbOS palette, and embedded as extended SGX graphic records. A directly
 requested image is returned as a one-image DOX document. Scripts, active
 content, and unsupported binary response types are not included.
+
+Bounded GET forms support one-line text/search fields and submit buttons.
+Hidden values and checked radio/checkbox defaults are retained in the short
+action URL. POST forms, named submit values, and GET forms containing enabled
+named password, file, text-area, select, or other unsupported controls are
+omitted atomically; GB-proxy never emits a misleading partial form.
 
 Links use short proxy-local URLs because SymZilla history entries hold 127
 characters. Consequently, `--advertise-host` must be an address reachable from
