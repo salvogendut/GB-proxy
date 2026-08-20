@@ -113,6 +113,8 @@ class DoxSerializationTests(unittest.TestCase):
 		self.assertEqual(chunks[b"LINK"][0], 1)
 		self.assertIn(b"\x00https://example.com/next\x00", chunks[b"LINK"])
 		self.assertEqual(chunks[b"GRPH"][0], 1)
+		self.assertIn(b"Next", chunks[b"TEXT"])
+		self.assertNotIn(b"\x03Next\x04", chunks[b"TEXT"])
 		self.assertIn(bytes((10, 2, 1, 0x80, 1, 1, 5, 1)), chunks[b"TEXT"])
 
 	def test_page_images_are_fetched_eagerly_and_embedded(self):

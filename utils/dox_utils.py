@@ -441,11 +441,11 @@ class _DoxBuilder:
 		if name == "a":
 			link_id = self._add_link(node.get("href"))
 			linked_before = self._linked_graphic_insertions
-			if link_id is not None:
-				self._append_control(b"\x03")
+			# SymbOS 4.1 changed control 3 from a one-byte underline toggle
+			# into a two-byte formatting command.  The clickable link graphic
+			# is portable across releases, so keep the label as plain text.
 			self._render_link_children(node, link_id, preserve=preserve)
 			if link_id is not None:
-				self._append_control(b"\x04")
 				if self._linked_graphic_insertions == linked_before:
 					self.append_link_icon(link_id)
 			return
