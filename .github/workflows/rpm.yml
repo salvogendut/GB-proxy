@@ -1,0 +1,172 @@
+name: RPM
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rpm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build RPM (Fedora 44)
+    runs-on: ubuntu-latest
+    container: fedora:44
+    timeout-minutes: 30
+
+    steps:
+      - name: Install RPM tooling
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            git-core tar gzip rpm-build rpmdevtools dnf5-plugins \
+            python3-devel python3-pip python3-setuptools python3-wheel \
+            python3-packaging pyproject-rpm-macros systemd-rpm-macros \
+            python3-flask python3-werkzeug python3-beautifulsoup4 \
+            python3-html5lib python3-pillow python3-requests \
+            python3-waitress librsvg2-tools
+
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mark workspace as a safe Git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Validate release versions
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          spec_version=$(rpmspec -q --srpm --qf '%{VERSION}\n' \
+            gb-proxy.spec | head -n 1)
+          python_version=$(python3 -c \
+            "import configparser; c=configparser.ConfigParser(); c.read('setup.cfg'); print(c['metadata']['version'])")
+          package_version=$(python3 -c \
+            "from gb_proxy import __version__; print(__version__)")
+          man_version=$(sed -n \
+            's/^\.TH GB-PROXY 1 .* "GB-proxy \([^"]*\)".*/\1/p' \
+            packaging/gb-proxy.1)
+
+          for version in "$python_version" "$package_version" "$man_version"; do
+            if [[ "$version" != "$spec_version" ]]; then
+              echo "Version mismatch: spec=$spec_version, setup=$python_version, package=$package_version, man=$man_version" >&2
+              exit 1
+            fi
+          done
+
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Release tags must have the form vN.N.N: $GITHUB_REF_NAME" >&2
+              exit 1
+            fi
+            if [[ "$GITHUB_REF_NAME" != "v$spec_version" ]]; then
+              echo "Tag $GITHUB_REF_NAME does not match package version $spec_version" >&2
+              exit 1
+            fi
+          fi
+
+          echo "version=$spec_version" >> "$GITHUB_OUTPUT"
+
+      - name: Install generated build requirements
+        run: dnf builddep -y gb-proxy.spec
+
+      - name: Build and test binary and source RPMs
+        env:
+          RPM_TOPDIR: ${{ github.workspace }}/rpmbuild
+        run: ./packaging/build-rpm.sh "$GITHUB_SHA"
+
+      - name: Verify and collect RPMs
+        env:
+          RPM_TOPDIR: ${{ github.workspace }}/rpmbuild
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find "$RPM_TOPDIR/RPMS" -type f \
+            -name 'gb-proxy-*.noarch.rpm' -exec cp -v {} release/ \;
+          find "$RPM_TOPDIR/SRPMS" -type f \
+            -name 'gb-proxy-*.src.rpm' -exec cp -v {} release/ \;
+
+          shopt -s nullglob
+          binary_rpms=(release/gb-proxy-"$PACKAGE_VERSION"-*.noarch.rpm)
+          source_rpms=(release/gb-proxy-"$PACKAGE_VERSION"-*.src.rpm)
+          if (( ${#binary_rpms[@]} != 1 || ${#source_rpms[@]} != 1 )); then
+            echo "Expected exactly one noarch RPM and one source RPM" >&2
+            exit 1
+          fi
+
+          rpms=("${binary_rpms[@]}" "${source_rpms[@]}")
+          rpm --checksig "${rpms[@]}"
+          for rpm_file in "${rpms[@]}"; do
+            test "$(rpm -qp --qf '%{NAME}' "$rpm_file")" = gb-proxy
+            test "$(rpm -qp --qf '%{VERSION}' "$rpm_file")" = \
+              "$PACKAGE_VERSION"
+          done
+          sha256sum "${rpms[@]}" | sed 's#release/##' \
+            > release/SHA256SUMS
+
+      - name: Upload RPM workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gb-proxy-rpm
+          path: release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Download verified RPMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: gb-proxy-rpm
+          path: release
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(release/*.rpm release/SHA256SUMS)
+          if [[ ! -f release/SHA256SUMS ]] || (( ${#assets[@]} != 3 )); then
+            echo "Expected two RPMs and SHA256SUMS" >&2
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" \
+              >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" \
+              --repo "$REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --repo "$REPOSITORY" --verify-tag --generate-notes \
+              --title "GB-proxy ${RELEASE_TAG#v}" --draft
+          fi
+
+          gh release edit "$RELEASE_TAG" --repo "$REPOSITORY" \
+            --draft=false
