@@ -236,6 +236,8 @@ def create_app(
 		("MAX_DOX_LINKS", 64),
 		("MAX_DOX_GRAPHICS", 8),
 		("MAX_DOX_GRAPHICS_BYTES", 64 * 1024),
+		("MAX_DOX_CONTROLS", 16),
+		("MAX_DOX_CONTROL_BYTES", 2 * 1024),
 		("MAX_DOX_DOCUMENT_BYTES", 96 * 1024),
 		("MAX_DOX_IMAGE_WIDTH", 160),
 		("MAX_DOX_IMAGE_HEIGHT", 96),
@@ -263,6 +265,10 @@ def create_app(
 			max_graphics=int(getattr(settings, "MAX_DOX_GRAPHICS", 8)),
 			max_graphics_bytes=int(
 				getattr(settings, "MAX_DOX_GRAPHICS_BYTES", 64 * 1024)
+			),
+			max_controls=int(getattr(settings, "MAX_DOX_CONTROLS", 16)),
+			max_control_bytes=int(
+				getattr(settings, "MAX_DOX_CONTROL_BYTES", 2 * 1024)
 			),
 			max_document_bytes=int(
 				getattr(settings, "MAX_DOX_DOCUMENT_BYTES", 96 * 1024)
@@ -469,9 +475,9 @@ def _send_request(runtime, url, append_query=False, dox_requested=False):
 		"stream": True,
 	}
 	if request.method == "POST":
-		kwargs["data"] = request.form
+		kwargs["data"] = list(request.form.items(multi=True))
 	else:
-		kwargs["params"] = request.args if append_query else None
+		kwargs["params"] = list(request.args.items(multi=True)) if append_query else None
 	if runtime.request_callable is not None:
 		return runtime.request_callable(request.method, url, **kwargs), None
 	session = runtime.session_factory()

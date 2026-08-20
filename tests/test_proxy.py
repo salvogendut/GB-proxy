@@ -181,8 +181,52 @@ class GeobenchProxyRouteTests(unittest.TestCase):
 		self.assertNotIn("X-Upstream", response.headers)
 		call = request_get.call_args
 		self.assertEqual(call.args[:2], ("GET", "https://search.example/find?source=gb"))
-		self.assertEqual(call.kwargs["params"].get("q"), "retro")
+		self.assertEqual(call.kwargs["params"], [("q", "retro")])
 		self.assertEqual(call.kwargs["timeout"], (5.0, 30.0))
+
+	def test_short_get_form_preserves_repeated_and_escaped_query_values(self):
+		token = register_resource("url", "https://search.example/find?source=gb")
+		upstream = SimpleNamespace(
+			content=b"<html><body>ok</body></html>",
+			status_code=200,
+			headers={"Content-Type": "text/html"},
+			url="https://search.example/find",
+		)
+
+		with patch.object(self.runtime, "request_callable", return_value=upstream) as request_get:
+			response = self.client.get(
+				f"/u/{token}?tag=one&tag=two&blank=&term=a+b&symbols=%26%3D%2B%25%3F%23"
+			)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(request_get.call_args.kwargs["params"], [
+			("tag", "one"),
+			("tag", "two"),
+			("blank", ""),
+			("term", "a b"),
+			("symbols", "&=+%?#"),
+		])
+
+	def test_post_forwarding_preserves_repeated_form_values(self):
+		token = register_resource("url", "https://search.example/find")
+		upstream = SimpleNamespace(
+			content=b"<html><body>ok</body></html>",
+			status_code=200,
+			headers={"Content-Type": "text/html"},
+			url="https://search.example/find",
+		)
+
+		with patch.object(self.runtime, "request_callable", return_value=upstream) as request_post:
+			response = self.client.post(
+				f"/u/{token}", data={"tag": ["one", "two"], "blank": ""}
+			)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(request_post.call_args.kwargs["data"], [
+			("tag", "one"),
+			("tag", "two"),
+			("blank", ""),
+		])
 
 	def test_direct_get_does_not_duplicate_existing_query(self):
 		upstream = SimpleNamespace(
