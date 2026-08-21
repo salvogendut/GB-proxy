@@ -82,7 +82,9 @@ The `geobench` preset:
 
 - reduces pages to the HTML subset supported by `BROWSER.APP`;
 - retains links and compact GET forms;
-- rewrites links and images to short proxy-local tokens;
+- keeps plain-HTTP link destinations readable when they fit the browser's
+  47-character link buffer;
+- rewrites HTTPS and longer links, forms, and images to short proxy-local tokens;
 - downloads and converts images lazily;
 - bounds images to 160x96 pixels;
 - emits GBPC v2 `.PIC` data, defaulting to canonical four-colour Mode 1;
@@ -91,6 +93,8 @@ The `geobench` preset:
 
 Short tokens are held in a bounded, expiring in-memory registry. They therefore
 expire after a configured idle period and do not survive a service restart.
+When GEOBENCH follows a tokenized link, the token remains visible in its address
+bar because the browser has no separate display-URL field.
 
 When `.PIC` conversion is enabled, a client currently using MSX Screen 7 can
 advertise `X-GBPC: 7,1` on each request. The proxy then returns 16-colour GBPC
@@ -177,11 +181,14 @@ SymZilla represents a proxy-generated link with a small eye icon after its
 plain-text label. Activate the icon to follow the link; the label itself is not
 the clickable control.
 
-Links use short proxy-local URLs because SymZilla history entries hold 127
-characters. Consequently, `--advertise-host` must be an address reachable from
-the SymbOS machine, and links expire with the same bounded in-memory registry
-used by the GEOBENCH preset. The proprietary request headers are consumed by
-GB-proxy; upstream sites receive a conventional web/image `Accept` value.
+Ordinary printable-ASCII HTTP and HTTPS links remain as their original absolute
+URLs when they fit SymZilla's 127-character navigation/history limit, so the
+real destination remains visible after navigation. Longer links and bounded GET
+form actions use short proxy-local URLs. Consequently, `--advertise-host` must
+still be an address reachable from the SymbOS machine. Tokenized links expire
+with the same bounded in-memory registry used by the GEOBENCH preset. The
+proprietary request headers are consumed by GB-proxy; upstream sites receive a
+conventional web/image `Accept` value.
 Responses include `Vary: Accept, X-GB-SGX` so caches keep capability variants
 separate.
 
@@ -278,8 +285,8 @@ After updating all version locations to the next release, tag that version. For
 example:
 
 ```shell
-git tag -a v0.3.0 -m "GB-proxy 0.3.0"
-git push origin v0.3.0
+git tag -a v0.4.0 -m "GB-proxy 0.4.0"
+git push origin v0.4.0
 ```
 
 The tag must have the form `vN.N.N` and match the versions in

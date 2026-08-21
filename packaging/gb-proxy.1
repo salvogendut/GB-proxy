@@ -1,4 +1,4 @@
-.TH GB-PROXY 1 "August 2026" "GB-proxy 0.2.0" "User Commands"
+.TH GB-PROXY 1 "August 2026" "GB-proxy 0.3.0" "User Commands"
 .SH NAME
 gb-proxy \- adapt modern web content for GEOBENCH and SymZilla
 .SH SYNOPSIS
@@ -32,6 +32,13 @@ The clients contact GB-proxy over plain HTTP.  GB-proxy performs HTTP or HTTPS
 requests to upstream sites and returns client-specific converted content.  Its
 root URL is not a browsing interface; configure it as the client's proxy
 endpoint.
+.PP
+GB-proxy preserves original absolute link URLs when they fit the receiving
+client's safe navigation buffer.  SymZilla can retain printable HTTP or HTTPS
+targets up to 127 characters.  The GEOBENCH preset can retain plain-HTTP targets
+up to its 47-character link limit.  Longer links, GEOBENCH HTTPS links, and form
+actions use compact proxy-local tokens; those tokens remain visible in clients
+which do not keep a separate display URL.
 .SH REMOTE MARKDOWN
 GB-proxy renders remote Markdown for both client families.  GEOBENCH receives
 simplified HTML, while SymZilla receives a bounded DOX representation.  A

@@ -29,11 +29,11 @@ class GeobenchHtmlTests(unittest.TestCase):
 		self.app.add_url_rule("/i/<token>.<extension>", endpoint="serve_short_image", view_func=lambda token, extension: "")
 		self.app.add_url_rule("/u/<token>", endpoint="follow_short_url", view_func=lambda token: "")
 
-	def transcode(self, document):
+	def transcode(self, document, url="https://example.com/base/page.html"):
 		with self.app.test_request_context("/"):
 			return transcode_html(
 				document,
-				"https://example.com/base/page.html",
+				url,
 				whitelisted_domains=[],
 				simplify_html=True,
 				tags_to_unwrap=preset.TAGS_TO_UNWRAP,
@@ -46,6 +46,7 @@ class GeobenchHtmlTests(unittest.TestCase):
 				shorten_link_urls=True,
 				short_image_urls=True,
 				ascii_only=True,
+				max_direct_link_url_bytes=preset.MAX_DIRECT_LINK_URL_BYTES,
 				max_image_alt_length=preset.MAX_IMAGE_ALT_LENGTH,
 			)
 
@@ -88,6 +89,55 @@ class GeobenchHtmlTests(unittest.TestCase):
 		)
 		form_token = soup.form["action"].rsplit("/", 1)[1]
 		self.assertEqual(resolve_resource("url", form_token).target, "https://search.example/find")
+
+	def test_short_plain_http_links_remain_readable_but_https_links_are_shortened(self):
+		output = self.transcode(
+			'<a id="plain" href="/next">Plain</a>'
+			'<a id="secure" href="https://secure.example/next">Secure</a>',
+			url="http://example.com/start",
+		).decode("ascii")
+		soup = BeautifulSoup(output, "html.parser")
+
+		self.assertEqual(
+			soup.find("a", string="Plain")["href"], "http://example.com/next"
+		)
+		secure_url = soup.find("a", string="Secure")["href"]
+		self.assertTrue(secure_url.startswith("http://192.168.1.2:5001/u/"))
+		self.assertEqual(
+			resolve_resource("url", secure_url.rsplit("/", 1)[1]).target,
+			"https://secure.example/next",
+		)
+
+	def test_direct_link_limit_is_exact_and_longer_links_fall_back_to_tokens(self):
+		prefix = "http://example.com/"
+		at_limit = prefix + "a" * (preset.MAX_DIRECT_LINK_URL_BYTES - len(prefix))
+		over_limit = at_limit + "b"
+		output = self.transcode(
+			f'<a id="fits" href="{at_limit}">Fits</a>'
+			f'<a id="long" href="{over_limit}">Long</a>',
+			url="http://example.com/start",
+		).decode("ascii")
+		soup = BeautifulSoup(output, "html.parser")
+
+		self.assertEqual(soup.find("a", string="Fits")["href"], at_limit)
+		long_url = soup.find("a", string="Long")["href"]
+		self.assertTrue(long_url.startswith("http://192.168.1.2:5001/u/"))
+		self.assertEqual(
+			resolve_resource("url", long_url.rsplit("/", 1)[1]).target,
+			over_limit,
+		)
+
+	def test_non_ascii_and_rfc_unsafe_urls_fall_back_to_tokens(self):
+		output = self.transcode(
+			'<a href="http://example.com/café">Unicode</a>'
+			"<a href='http://example.com/a&quot;b'>Unsafe</a>",
+			url="http://example.com/start",
+		).decode("ascii")
+		soup = BeautifulSoup(output, "html.parser")
+
+		for label in ("Unicode", "Unsafe"):
+			url = soup.find("a", string=label)["href"]
+			self.assertTrue(url.startswith("http://192.168.1.2:5001/u/"))
 
 	def test_inline_svg_is_registered_lazily(self):
 		output = self.transcode(

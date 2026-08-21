@@ -37,6 +37,10 @@ _TEXT_TRAILER = b"\x04\x02\x01\x01\x00\xff"
 _FORM_MARKER_SUFFIX = b"\x80\x00\x01\x05\x01"
 _CHUNK_NAMES = (b"INFO", b"HEAD", b"TEXT", b"GRPH", b"LINK", b"CTRL", b"ENDF")
 _REQUIRED_CHUNKS = frozenset((b"INFO", b"HEAD", b"TEXT", b"GRPH", b"LINK", b"ENDF"))
+_DIRECT_URL_BYTES = frozenset(
+	b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	b"-._~:/?#[]@!$&'()*+,;=%"
+)
 _BLOCK_TAGS = frozenset((
 	"address", "article", "aside", "blockquote", "caption", "dd", "div", "dl",
 	"dt", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
@@ -159,6 +163,21 @@ def _ascii(value, *, limit=None):
 	)
 	data = value.encode("ascii")
 	return data if limit is None else data[:limit]
+
+
+def _direct_url_bytes(value, limit):
+	"""Return an exact printable ASCII URL when SymZilla can retain it."""
+	try:
+		data = str(value).encode("ascii")
+	except UnicodeEncodeError:
+		return None
+	if not data or len(data) > limit:
+		return None
+	if any(byte not in _DIRECT_URL_BYTES for byte in data):
+		return None
+	if not data.lower().startswith((b"http://", b"https://")):
+		return None
+	return data
 
 
 def _absolute_http_url(base_url, value):
@@ -292,7 +311,7 @@ class _DoxBuilder:
 		self._graphics_bytes += len(graphic)
 		return len(self.graphics)
 
-	def _add_link(self, value, *, unique=False):
+	def _add_link(self, value, *, unique=False, always_shorten=False):
 		url = _absolute_http_url(self.base_url, value)
 		if url is None:
 			return None
@@ -303,7 +322,8 @@ class _DoxBuilder:
 		if len(self.links) >= self.limits.max_links:
 			return None
 		target = url
-		if self.link_shortener is not None:
+		direct_data = _direct_url_bytes(url, self.limits.max_url_bytes)
+		if self.link_shortener is not None and (always_shorten or direct_data is None):
 			try:
 				url = self.link_shortener(url)
 			except Exception as error:
@@ -600,7 +620,7 @@ class _DoxBuilder:
 		if working_bytes > self.limits.max_control_bytes:
 			return
 
-		link_id = self._add_link(action, unique=True)
+		link_id = self._add_link(action, unique=True, always_shorten=True)
 		if link_id != action_link_id:
 			return
 		self.controls = controls

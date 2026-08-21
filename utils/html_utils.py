@@ -17,6 +17,12 @@ from utils.image_utils import GBPC_MODE_1, fetch_and_cache_image, image_extensio
 from utils.resource_registry import register_resource
 
 
+_DIRECT_URL_BYTES = frozenset(
+	b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	b"-._~:/?#[]@!$&'()*+,;=%"
+)
+
+
 class URLAwareHTMLFormatter(HTMLFormatter):
 	def escape(self, string):
 		if isinstance(string, list):
@@ -223,7 +229,23 @@ def _rewrite_images(soup, base_url, max_alt_length=None):
 			image_tag["alt"] = str(image_tag["alt"])[:max_alt_length]
 
 
-def _rewrite_navigation(soup, base_url):
+def _direct_navigation_url(target, max_bytes):
+	"""Return a GEOBENCH-safe direct URL, or None when it needs shortening."""
+	if not max_bytes:
+		return None
+	try:
+		data = target.encode("ascii")
+	except UnicodeEncodeError:
+		return None
+	parsed = urlparse(target)
+	if parsed.scheme.lower() != "http" or not parsed.netloc:
+		return None
+	if len(data) > max_bytes or any(byte not in _DIRECT_URL_BYTES for byte in data):
+		return None
+	return target
+
+
+def _rewrite_navigation(soup, base_url, max_direct_link_url_bytes=0):
 	for link_tag in soup.find_all("a"):
 		href = link_tag.get("href")
 		if not href or str(href).startswith("#"):
@@ -232,8 +254,12 @@ def _rewrite_navigation(soup, base_url):
 		if target is None:
 			link_tag.attrs.pop("href", None)
 			continue
-		token = register_resource("url", target)
-		link_tag["href"] = _proxy_url("follow_short_url", token=token)
+		direct_url = _direct_navigation_url(target, max_direct_link_url_bytes)
+		if direct_url is not None:
+			link_tag["href"] = direct_url
+		else:
+			token = register_resource("url", target)
+			link_tag["href"] = _proxy_url("follow_short_url", token=token)
 
 	for form_tag in soup.find_all("form"):
 		action = form_tag.get("action") or base_url
@@ -292,7 +318,8 @@ def transcode_html(document, url=None, whitelisted_domains=None, simplify_html=F
 				  convert_characters=False, conversion_table=None,
 				  allowed_tags=None, allowed_attributes=None,
 				  shorten_link_urls=False, short_image_urls=False, ascii_only=False,
-				  max_image_alt_length=None, gbpc_mode=GBPC_MODE_1):
+				  max_direct_link_url_bytes=0, max_image_alt_length=None,
+				  gbpc_mode=GBPC_MODE_1):
 	"""Convert an HTML response for the configured legacy client."""
 	if isinstance(document, bytes):
 		document = document.decode("utf-8", errors="replace")
@@ -322,7 +349,7 @@ def transcode_html(document, url=None, whitelisted_domains=None, simplify_html=F
 	if short_image_urls:
 		_rewrite_images(soup, base_url, max_image_alt_length)
 	if shorten_link_urls:
-		_rewrite_navigation(soup, base_url)
+		_rewrite_navigation(soup, base_url, max_direct_link_url_bytes)
 	else:
 		_downgrade_urls(soup)
 

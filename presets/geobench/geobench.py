@@ -111,6 +111,9 @@ ALLOWED_HTML_ATTRIBUTES = {
 
 SHORTEN_LINK_URLS = True
 SHORT_IMAGE_URLS = True
+# Preserve readable plain-HTTP destinations that fit BROWSER.APP's href buffer.
+# HTTPS and longer links still use proxy-local tokens.
+MAX_DIRECT_LINK_URL_BYTES = 47
 # BROWSER.APP retains 23 characters of image alt text in its bounded tag parser.
 MAX_IMAGE_ALT_LENGTH = 23
 ASCII_ONLY = True
