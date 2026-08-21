@@ -30,7 +30,7 @@ jobs:
             python3-devel python3-pip python3-setuptools python3-wheel \
             python3-packaging pyproject-rpm-macros systemd-rpm-macros \
             python3-flask python3-werkzeug python3-beautifulsoup4 \
-            python3-html5lib python3-pillow python3-requests \
+            python3-html5lib python3-markdown python3-pillow python3-requests \
             python3-waitress librsvg2-tools
 
       - name: Check out source

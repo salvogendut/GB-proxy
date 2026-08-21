@@ -4,7 +4,8 @@ GB-proxy is an extensible HTTP proxy with first-class integrations for both
 GEOBENCH and SymZilla on SymbOS. It also retains inherited support for other
 constrained legacy web clients. It connects compatible early computers to the
 modern Internet by simplifying HTML, rewriting long links, transliterating
-text, and converting images into formats they can display.
+text, rendering remote Markdown, and converting images into formats they can
+display.
 
 It is a downstream fork of
 [MacProxy Plus](https://github.com/hunterirving/macproxy_plus), itself based on
@@ -97,6 +98,36 @@ Mode-7 images with the GEOBENCH MSX palette and two pixels per byte. A Mode-6
 client can send `X-GBPC: 1` or omit the header; absent, malformed, and unknown
 offers safely retain the byte-compatible Mode-1 output. `X-GBPC` is consumed by
 the proxy and is not forwarded to upstream websites.
+
+## Remote Markdown
+
+GB-proxy renders remote Markdown for both supported client families. GEOBENCH
+receives simplified HTML, while SymZilla receives the same bounded DOX
+representation it negotiates for ordinary web pages. An upstream response is
+recognized as Markdown when it uses the `text/markdown` media type or a legacy
+`text/x-markdown`, `application/markdown`, or `application/x-markdown` alias.
+For compatibility with simple file servers, a URL path ending in `.md` or
+`.markdown` is also recognized when the server labels its response `text/plain`.
+
+The supported safe subset includes headings, paragraphs, ordered and unordered
+lists, emphasis, code spans and blocks, tables, links, and remote images.
+GEOBENCH retains simple table markup; SymZilla renders the cell content in
+reading order rather than as a grid.
+Relative link and image destinations are resolved against the final remote
+document URL after redirects. Remote HTTP or HTTPS images then pass through the
+same download, size, conversion, and colour limits as images in HTML pages.
+
+Raw HTML embedded in Markdown is inactive. It cannot create scripts, forms,
+frames, links, image fetches, or other active browser elements. Markdown itself
+has no supported form syntax; only forms from ordinary HTML pages can produce
+the bounded controls described below. Excessively complex inline-code delimiter
+layouts are rejected before parsing so a hostile document cannot monopolize a
+proxy worker.
+
+This support applies only to documents fetched through GB-proxy. SymZilla does
+not parse local `.MD` or `.MARKDOWN` files, and opening one directly from its
+file selector is not supported. Convert a local document to DOX separately or
+serve it over HTTP with one of the recognized content types.
 
 ## SymbOS (SymZilla) DOX and SGX output
 

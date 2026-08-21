@@ -6,14 +6,19 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
+from urllib.parse import urlparse
+from unittest.mock import patch
 
 import requests
+from bs4 import BeautifulSoup
+from flask import Response as FlaskResponse
 from PIL import Image
 
 from gb_proxy.application import create_app, domain_matches
 from tests.config_stub import install_config
 from utils.dox_utils import DOX_MIMETYPE, validate_dox
 from utils.image_utils import SYMBOS_PALETTE
+from utils.markdown_utils import MarkdownSafetyError
 from utils.resource_registry import resolve_resource
 from utils.system_utils import ConfigurationError
 
@@ -59,6 +64,26 @@ class ApplicationFactoryTests(unittest.TestCase):
 
 		self.assertEqual(app.config["GB_PROXY_ADVERTISE_URL"], "http://192.0.2.10:5001")
 		self.assertEqual(app.config["MACPROXY_HOST_AND_PORT"], "192.0.2.10:5001")
+		self.assertEqual(
+			app.extensions["gb_proxy_runtime"].max_markdown_source_bytes,
+			1024 * 1024,
+		)
+
+	def test_factory_rejects_non_positive_markdown_source_limit(self):
+		config = install_config()
+		for value in (0, -1):
+			with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+				had_value = hasattr(config, "MAX_MARKDOWN_SOURCE_BYTES")
+				old_value = getattr(config, "MAX_MARKDOWN_SOURCE_BYTES", None)
+				config.MAX_MARKDOWN_SOURCE_BYTES = value
+				try:
+					with self.assertRaises(ConfigurationError):
+						create_app(config, cache_dir=directory, state_dir=directory)
+				finally:
+					if had_value:
+						config.MAX_MARKDOWN_SOURCE_BYTES = old_value
+					else:
+						del config.MAX_MARKDOWN_SOURCE_BYTES
 
 	def test_factory_does_not_clear_an_existing_cache(self):
 		with tempfile.TemporaryDirectory() as directory:
@@ -177,6 +202,329 @@ class ApplicationFactoryTests(unittest.TestCase):
 						setattr(config, name, old_value)
 					else:
 						delattr(config, name)
+
+
+class MarkdownApplicationTests(unittest.TestCase):
+	def _request(self, upstream, headers=None, *, config=None, path="/document"):
+		with tempfile.TemporaryDirectory() as directory:
+			calls = []
+
+			def send(method, url, **kwargs):
+				calls.append((method, url, kwargs))
+				return upstream(method, url, **kwargs) if callable(upstream) else upstream
+
+			app = create_app(
+				config or install_config(),
+				cache_dir=directory,
+				state_dir=directory,
+				request_callable=send,
+			)
+			response = app.test_client().get(
+				path,
+				base_url="http://example.com",
+				headers=headers or {},
+			)
+			return response, calls
+
+	def test_markdown_is_rendered_as_html_for_normal_clients(self):
+		upstream = SimpleNamespace(
+			content=b"# Project\n\nSee [Next](/next).",
+			status_code=200,
+			headers={"Content-Type": "text/markdown; charset=utf-8"},
+			url="https://example.com/docs/readme.md",
+		)
+
+		response, _ = self._request(upstream)
+		body = response.get_data(as_text=True)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.headers["Content-Type"], "text/html; charset=utf-8")
+		self.assertIn("<h1", body)
+		self.assertIn("Project</h1>", body)
+		self.assertIn(">Next</a>", body)
+		soup = BeautifulSoup(body, "html.parser")
+		path = urlparse(soup.a["href"]).path
+		token = path.rstrip("/").rsplit("/", 1)[-1]
+		self.assertEqual(
+			resolve_resource("url", token).target,
+			"https://example.com/next",
+		)
+
+	def test_markdown_is_converted_before_negotiated_dox_rendering(self):
+		upstream = SimpleNamespace(
+			content=b"# Project\n\nSee [Next](/next).",
+			status_code=200,
+			headers={"Content-Type": "text/markdown"},
+			url="https://example.com/docs/readme.md",
+		)
+
+		response, calls = self._request(upstream, headers={"Accept": DOX_MIMETYPE})
+		chunks = validate_dox(response.data)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.content_type, DOX_MIMETYPE)
+		self.assertIn(b"Project", chunks[b"TEXT"])
+		self.assertEqual(chunks[b"LINK"][0], 1)
+		self.assertIn(
+			"text/html, application/xhtml+xml, text/markdown;q=0.9",
+			calls[0][2]["headers"]["Accept"],
+		)
+
+	def test_plain_text_markdown_suffix_converts_but_txt_stays_plain(self):
+		markdown = SimpleNamespace(
+			content=b"# Suffix detection",
+			status_code=200,
+			headers={"Content-Type": "text/plain"},
+			url="http://example.com/README.md",
+		)
+		plain = SimpleNamespace(
+			content=b"# Literal text",
+			status_code=200,
+			headers={"Content-Type": "text/plain"},
+			url="http://example.com/README.txt",
+		)
+
+		markdown_response, _ = self._request(markdown)
+		plain_response, _ = self._request(plain)
+
+		self.assertEqual(markdown_response.mimetype, "text/html")
+		self.assertIn("<h1", markdown_response.get_data(as_text=True))
+		self.assertEqual(plain_response.content_type, "text/plain")
+		self.assertEqual(plain_response.data, b"# Literal text")
+
+	def test_redirect_final_url_controls_markdown_detection(self):
+		upstream = SimpleNamespace(
+			content=b"# Redirected Markdown",
+			status_code=200,
+			headers={"Content-Type": "text/plain"},
+			url="https://cdn.example.net/releases/README.markdown",
+		)
+
+		response, calls = self._request(upstream, path="/download")
+
+		self.assertEqual(calls[0][1], "http://example.com/download")
+		self.assertEqual(response.mimetype, "text/html")
+		self.assertIn("Redirected Markdown</h1>", response.get_data(as_text=True))
+
+	def test_markdown_relative_resources_use_the_final_url_for_html(self):
+		upstream = SimpleNamespace(
+			content=(
+				b"[Guide](../guide.md)\n\n"
+				b"![Logo](images/logo.png)"
+			),
+			status_code=200,
+			headers={"Content-Type": "text/markdown"},
+			url="https://cdn.example.net/releases/v2/README.md",
+		)
+
+		response, _ = self._request(upstream)
+		soup = BeautifulSoup(response.get_data(as_text=True), "html.parser")
+		link_token = soup.a["href"].rstrip("/").rsplit("/", 1)[-1]
+		image_token = soup.img["src"].rsplit("/", 1)[-1].split(".", 1)[0]
+
+		self.assertEqual(
+			resolve_resource("url", link_token).target,
+			"https://cdn.example.net/releases/guide.md",
+		)
+		self.assertEqual(
+			resolve_resource("image", image_token).target,
+			"https://cdn.example.net/releases/v2/images/logo.png",
+		)
+
+	def test_markdown_relative_resources_use_the_final_url_for_dox(self):
+		image = Image.new("RGB", (8, 1), "black")
+		image_bytes = io.BytesIO()
+		image.save(image_bytes, format="PNG")
+		image_url = "https://cdn.example.net/releases/v2/images/logo.png"
+
+		def upstream(method, url, **kwargs):
+			if url == image_url:
+				return SimpleNamespace(
+					content=image_bytes.getvalue(),
+					status_code=200,
+					headers={"Content-Type": "image/png"},
+					url=url,
+				)
+			return SimpleNamespace(
+				content=(
+					b"[Guide](../guide.md)\n\n"
+					b"![Logo](images/logo.png)"
+				),
+				status_code=200,
+				headers={"Content-Type": "text/markdown"},
+				url="https://cdn.example.net/releases/v2/README.md",
+			)
+
+		response, calls = self._request(upstream, headers={"Accept": DOX_MIMETYPE})
+		chunks = validate_dox(response.data)
+		entry_length = struct.unpack_from("<H", chunks[b"LINK"], 1)[0]
+		short_url = chunks[b"LINK"][4:3 + entry_length].rstrip(b"\x00").decode("ascii")
+		link_token = short_url.rsplit("/", 1)[-1]
+
+		# One inline image plus the existing clickable-link marker graphic.
+		self.assertEqual(chunks[b"GRPH"][0], 2)
+		self.assertEqual(calls[1][1], image_url)
+		self.assertEqual(
+			resolve_resource("url", link_token).target,
+			"https://cdn.example.net/releases/guide.md",
+		)
+
+	def test_markdown_headers_are_rewritten_case_insensitively(self):
+		upstream = SimpleNamespace(
+			content=b"# Download",
+			status_code=206,
+			headers={
+				"cOnTeNt-TyPe": "text/markdown",
+				"CONTENT-disposition": 'attachment; filename="README.md"',
+				"X-Origin": "retained",
+			},
+			url="http://example.com/README.md",
+		)
+
+		response, _ = self._request(upstream)
+
+		self.assertEqual(response.status_code, 206)
+		self.assertEqual(response.headers["Content-Type"], "text/html; charset=utf-8")
+		self.assertNotIn("Content-Disposition", response.headers)
+
+	def test_streamed_markdown_stops_at_the_dedicated_source_limit(self):
+		config = install_config()
+		had_value = hasattr(config, "MAX_MARKDOWN_SOURCE_BYTES")
+		old_value = getattr(config, "MAX_MARKDOWN_SOURCE_BYTES", None)
+		config.MAX_MARKDOWN_SOURCE_BYTES = 3
+
+		class StreamingMarkdown:
+			status_code = 200
+			headers = {"Content-Type": "text/markdown"}
+			url = "https://example.com/README.md"
+
+			@staticmethod
+			def iter_content(chunk_size):
+				self.assertEqual(chunk_size, 64 * 1024)
+				yield b"abc"
+				yield b"d"
+
+		try:
+			response, _ = self._request(StreamingMarkdown(), config=config)
+		finally:
+			if had_value:
+				config.MAX_MARKDOWN_SOURCE_BYTES = old_value
+			else:
+				del config.MAX_MARKDOWN_SOURCE_BYTES
+
+		self.assertEqual(response.status_code, 502)
+
+	def test_redirected_markdown_uses_the_smaller_source_limit_before_reading(self):
+		config = install_config()
+		had_value = hasattr(config, "MAX_MARKDOWN_SOURCE_BYTES")
+		old_value = getattr(config, "MAX_MARKDOWN_SOURCE_BYTES", None)
+		config.MAX_MARKDOWN_SOURCE_BYTES = 3
+		upstream = SimpleNamespace(
+			content=b"four",
+			status_code=200,
+			headers={"Content-Type": "text/plain"},
+			url="https://cdn.example.net/README.md",
+		)
+		try:
+			response, _ = self._request(upstream, config=config, path="/download")
+		finally:
+			if had_value:
+				config.MAX_MARKDOWN_SOURCE_BYTES = old_value
+			else:
+				del config.MAX_MARKDOWN_SOURCE_BYTES
+
+		self.assertEqual(response.status_code, 502)
+
+	def test_markdown_flask_response_from_extension_is_converted(self):
+		config = install_config()
+		old_extensions = config.ENABLED_EXTENSIONS
+		config.ENABLED_EXTENSIONS = ["markdown_test"]
+		extension = SimpleNamespace(
+			__name__="extensions.markdown_test.markdown_test",
+			DOMAIN="markdown.invalid",
+			handle_request=lambda request: FlaskResponse(
+				b"# Extension",
+				201,
+				headers={
+					"Content-Type": "text/markdown",
+					"content-DISPOSITION": "attachment",
+					"X-Extension": "yes",
+				},
+			),
+		)
+		try:
+			with tempfile.TemporaryDirectory() as directory:
+				with patch(
+					"gb_proxy.application._load_extensions",
+					return_value=(
+						{"markdown_test": extension},
+						{"markdown.invalid": extension},
+					),
+				):
+					app = create_app(config, cache_dir=directory, state_dir=directory)
+				response = app.test_client().get(
+					"/README", base_url="http://markdown.invalid"
+				)
+		finally:
+			config.ENABLED_EXTENSIONS = old_extensions
+
+		self.assertEqual(response.status_code, 201)
+		self.assertEqual(response.headers["Content-Type"], "text/html; charset=utf-8")
+		self.assertNotIn("Content-Disposition", response.headers)
+		self.assertIn("Extension</h1>", response.get_data(as_text=True))
+
+	def test_markdown_flask_response_from_extension_enforces_source_limit(self):
+		config = install_config()
+		old_extensions = config.ENABLED_EXTENSIONS
+		had_limit = hasattr(config, "MAX_MARKDOWN_SOURCE_BYTES")
+		old_limit = getattr(config, "MAX_MARKDOWN_SOURCE_BYTES", None)
+		config.ENABLED_EXTENSIONS = ["markdown_test"]
+		config.MAX_MARKDOWN_SOURCE_BYTES = 3
+		extension = SimpleNamespace(
+			__name__="extensions.markdown_test.markdown_test",
+			DOMAIN="markdown.invalid",
+			handle_request=lambda request: FlaskResponse(
+				b"four", headers={"Content-Type": "text/markdown"}
+			),
+		)
+		try:
+			with tempfile.TemporaryDirectory() as directory:
+				with patch(
+					"gb_proxy.application._load_extensions",
+					return_value=(
+						{"markdown_test": extension},
+						{"markdown.invalid": extension},
+					),
+				):
+					app = create_app(config, cache_dir=directory, state_dir=directory)
+				response = app.test_client().get(
+					"/README", base_url="http://markdown.invalid"
+				)
+		finally:
+			config.ENABLED_EXTENSIONS = old_extensions
+			if had_limit:
+				config.MAX_MARKDOWN_SOURCE_BYTES = old_limit
+			else:
+				del config.MAX_MARKDOWN_SOURCE_BYTES
+
+		self.assertEqual(response.status_code, 502)
+
+	def test_unsafe_markdown_complexity_returns_bad_gateway(self):
+		upstream = SimpleNamespace(
+			content=b"# Document",
+			status_code=200,
+			headers={"Content-Type": "text/markdown"},
+			url="https://example.com/README.md",
+		)
+
+		with patch(
+			"gb_proxy.application.markdown_to_html",
+			side_effect=MarkdownSafetyError("Markdown is too complex"),
+		):
+			response, _ = self._request(upstream)
+
+		self.assertEqual(response.status_code, 502)
+		self.assertIn("Markdown is too complex", response.get_data(as_text=True))
 
 
 class SymzillaDoxApplicationTests(unittest.TestCase):

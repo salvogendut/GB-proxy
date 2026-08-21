@@ -32,6 +32,45 @@ The clients contact GB-proxy over plain HTTP.  GB-proxy performs HTTP or HTTPS
 requests to upstream sites and returns client-specific converted content.  Its
 root URL is not a browsing interface; configure it as the client's proxy
 endpoint.
+.SH REMOTE MARKDOWN
+GB-proxy renders remote Markdown for both client families.  GEOBENCH receives
+simplified HTML, while SymZilla receives a bounded DOX representation.  A
+response is recognized as Markdown when its media type is
+.BR text/markdown ,
+or one of the legacy
+.BR text/x-markdown ,
+.BR application/markdown ,
+or
+.B application/x-markdown
+aliases.
+For compatibility with simple file servers, a URL ending in
+.B .md
+or
+.B .markdown
+is also recognized when the server labels the response
+.BR text/plain .
+.PP
+The safe subset includes headings, paragraphs, ordered and unordered lists,
+emphasis, code spans and blocks, tables, links, and remote images.  Relative
+link and image destinations are resolved against the final remote document URL
+after redirects.  HTTP and HTTPS images use the same bounded conversion path
+as images in HTML pages.
+.PP
+GEOBENCH retains simple table markup.  SymZilla renders the cell content in
+reading order rather than as a grid.
+.PP
+Raw HTML embedded in Markdown is inactive and cannot create scripts, forms,
+frames, links, image fetches, or other active elements.  Markdown forms are not
+supported.  Excessively complex inline-code delimiter layouts are rejected
+before parsing so a hostile document cannot monopolize a proxy worker.
+.PP
+Markdown support applies only to documents fetched through GB-proxy.  SymZilla
+does not parse local
+.B .MD
+or
+.B .MARKDOWN
+files.  Convert local documents to DOX separately or serve them over HTTP with
+one of the recognized content types.
 .SH OPTIONS
 .TP
 .BI "--config " PATH
