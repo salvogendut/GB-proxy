@@ -83,6 +83,7 @@ install -Dpm 0640 config.py.example %{buildroot}%{_sysconfdir}/%{name}/config.py
 - Render bounded, sanitized remote Markdown for GEOBENCH and SymZilla
 - Preserve readable original link URLs when they fit each client safely
 - Retain compact proxy tokens for long links, GEOBENCH HTTPS, and GET forms
+- Add an architecture-independent Debian 13 package and release artifact
 
 * Thu Aug 20 2026 Salvatore Bognanni <salvogendut@users.noreply.github.com> - 0.2.0-1
 - Negotiate 16-colour GBPC Mode-7 images with MSX Screen-7 clients

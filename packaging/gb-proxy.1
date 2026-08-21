@@ -14,6 +14,9 @@ into formats supported by early computers.
 The packaged systemd service listens only on the loopback interface by default.
 Edit
 .I /etc/sysconfig/gb-proxy
+on Fedora/EL or
+.I /etc/default/gb-proxy
+on Debian
 before exposing it to a trusted LAN.  The proxy is not intended to be exposed
 directly to the public Internet.
 .SH CLIENT SUPPORT
@@ -155,7 +158,10 @@ Python logging level.  The default is INFO.
 System configuration file.
 .TP
 .I /etc/sysconfig/gb-proxy
-Service command-line settings.
+Service command-line settings on Fedora/EL.
+.TP
+.I /etc/default/gb-proxy
+Service command-line settings on Debian.
 .TP
 .I /var/cache/gb-proxy
 Packaged service cache directory.

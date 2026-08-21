@@ -212,21 +212,22 @@ venv/bin/python -m pip install --editable '.[anthropic]'
 ```
 
 Available extras are `openai`, `anthropic`, `gemini`, and `mistral`.
-SVG rendering uses the distribution-provided `rsvg-convert` utility. RPM
-installations include it automatically. For source installations, install
-`librsvg2-tools` on Fedora/EL or `librsvg2-bin` on Debian/Ubuntu. Without it,
-HTML/text and raster-image conversion to GBPC or SGX continue to work, but SVG
-images cannot be rendered.
+SVG rendering uses the distribution-provided `rsvg-convert` utility. RPM and
+Debian package installations include it automatically. For source
+installations, install `librsvg2-tools` on Fedora/EL or `librsvg2-bin` on
+Debian/Ubuntu. Without it, HTML/text and raster-image conversion to GBPC or SGX
+continue to work, but SVG images cannot be rendered.
 
 ## systemd service
 
-The RPM installs `gb-proxy.service` but does not enable it automatically. One
-service instance can serve both GEOBENCH and SymbOS/SymZilla; no separate
-SymZilla service is required.
+The RPM and Debian package install `gb-proxy.service` but do not enable it
+automatically. One service instance can serve both GEOBENCH and
+SymbOS/SymZilla; no separate SymZilla service is required.
 
 1. Edit `/etc/gb-proxy/config.py`. Enable the `geobench` preset for GEOBENCH;
    SymZilla needs no preset. Select any desired extensions for either client.
-2. Edit `/etc/sysconfig/gb-proxy`.
+2. Edit `/etc/sysconfig/gb-proxy` on Fedora/EL, or
+   `/etc/default/gb-proxy` on Debian.
 3. For LAN access, set `GB_PROXY_HOST=0.0.0.0` and set
    `GB_PROXY_ADVERTISE_HOST` to the server's LAN address.
 4. Open TCP port 5001 only on a trusted interface or zone.
@@ -244,42 +245,51 @@ paths:
 - image cache: `/var/cache/gb-proxy`;
 - extension state: `/var/lib/gb-proxy`;
 - configuration: `/etc/gb-proxy/config.py`;
-- service environment: `/etc/sysconfig/gb-proxy`.
+- service environment: `/etc/sysconfig/gb-proxy` on Fedora/EL or
+  `/etc/default/gb-proxy` on Debian.
 
 The server uses one process and defaults to one request thread. Do not add
 multiple worker processes: short tokens and some extension sessions are
 intentionally process-local. Only increase `GB_PROXY_THREADS` when every enabled
 extension is known to be thread-safe and client isolation is not required.
 
-## RPM build
+## RPM and Debian package builds
 
-The application is pure Python and produces a `noarch` RPM. The spec is intended
-for native Fedora and EL9-compatible builds with EPEL/CRB enabled; CI validates
-Fedora 44. Automated GitHub releases are built on Fedora 44. `noarch` means
-CPU-independent, not independent of distribution package dependencies.
+The application is pure Python. Automated releases produce a `noarch` RPM on
+Fedora 44 and an `all` Debian package on Debian 13. Those labels mean
+CPU-independent, not independent of distribution package dependencies. The RPM
+spec is also intended for native EL9 builds with EPEL/CRB enabled, but CI
+validates Fedora 44 only.
 
-Install the normal RPM build tools and the Python dependencies, then build a
-committed checkout with:
+After installing the appropriate distribution build tools and declared Python
+dependencies, build a committed checkout with:
 
 ```shell
 ./packaging/build-rpm.sh
+./packaging/build-deb.sh
 ```
 
-Set `RPM_TOPDIR` to use a build tree other than `~/rpmbuild`, or pass a Git ref
-as the first argument. The helper creates the source archive with `git archive`,
-so uncommitted changes are not included.
-
-For a tagged release, standard RPM tooling can fetch the sources declared by
-the spec:
+Set `RPM_TOPDIR` or `DEB_OUTPUT_DIR` to choose another output directory. Either
+helper accepts a Git ref as its first argument and creates a source archive with
+`git archive`, so uncommitted changes are not included. Standard RPM tooling can
+also fetch the tagged sources declared by the spec:
 
 ```shell
 spectool -g -R gb-proxy.spec
 rpmbuild -ba gb-proxy.spec
 ```
 
-GitHub Actions also builds an RPM and source RPM for pushes to `master` and
-pull requests targeting `master`. Pushing a version tag creates or updates the
-corresponding GitHub Release and attaches both RPMs plus `SHA256SUMS`.
+Install a downloaded package using the matching distribution package manager:
+
+```shell
+sudo dnf install ./gb-proxy-0.3.0-1.fc44.noarch.rpm
+sudo apt install ./gb-proxy_0.3.0-1_all.deb
+```
+
+GitHub Actions builds the binary and source RPMs plus the Debian package for
+pushes to `master` and pull requests targeting `master`. Pushing a version tag
+creates or updates the corresponding GitHub Release and attaches all three
+packages plus `SHA256SUMS`.
 
 After updating all version locations to the next release, tag that version. For
 example:
@@ -289,12 +299,12 @@ git tag -a v0.4.0 -m "GB-proxy 0.4.0"
 git push origin v0.4.0
 ```
 
-The tag must have the form `vN.N.N` and match the versions in
-`gb-proxy.spec`, `setup.cfg`, `gb_proxy/__init__.py`, and the manual page.
-Release RPMs are currently unsigned; their SHA-256 digests are published for
-integrity checking.
+The tag must have the form `vN.N.N` and match the versions in `gb-proxy.spec`,
+`setup.cfg`, `gb_proxy/__init__.py`, the manual page, and `debian/changelog`.
+Published RPM and Debian packages are currently unsigned; their SHA-256 digests
+are included for integrity checking.
 
-RPM builds are offline after the declared sources and distribution packages
+Package builds are offline after the declared sources and distribution packages
 have been obtained. Dependencies are never downloaded by the service.
 
 ## Extensions
