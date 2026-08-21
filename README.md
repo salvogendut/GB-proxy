@@ -1,14 +1,25 @@
 # GB-proxy
 
-GB-proxy is an extensible HTTP proxy that connects GEOBENCH and other early
-computers to the modern Internet. It simplifies HTML, rewrites long links,
-transliterates text, and converts images into formats that constrained clients
-can display.
+GB-proxy is an extensible HTTP proxy with first-class integrations for both
+GEOBENCH and SymZilla on SymbOS. It also retains inherited support for other
+constrained legacy web clients. It connects compatible early computers to the
+modern Internet by simplifying HTML, rewriting long links, transliterating
+text, and converting images into formats they can display.
 
 It is a downstream fork of
 [MacProxy Plus](https://github.com/hunterirving/macproxy_plus), itself based on
-[MacProxy](https://github.com/rdmark/macproxy). This fork adds a GEOBENCH
-compatibility profile and portable GBPC v2 image output.
+[MacProxy](https://github.com/rdmark/macproxy). This fork adds dedicated support
+for two client families:
+
+- GEOBENCH's `BROWSER.APP`, using simplified HTML and portable GBPC v2 images;
+- SymZilla on SymbOS, using bounded DOX documents and negotiated SGX images.
+
+GB-proxy is the server-side transcoder, not the client network stack or browser
+renderer. GEOBENCH renders the simplified HTML/GBPC response; SymZilla renders
+the DOX/SGX response. Both clients connect to GB-proxy over plain HTTP, while
+GB-proxy performs HTTP or HTTPS requests to upstream sites. Configure its
+address as the client's proxy endpoint; opening the proxy root directly is not
+a browsing interface.
 
 ## Quick start from a checkout
 
@@ -18,11 +29,20 @@ GB-proxy requires Python 3.9 or newer.
 cp config.py.example config.py
 ```
 
-For GEOBENCH, enable its preset in `config.py`:
+Choose the setup for the client you are using. For GEOBENCH, enable its preset
+in `config.py`:
 
 ```python
 PRESET = "geobench"
 ```
+
+SymZilla on SymbOS does not require a separate preset. It negotiates DOX and
+SGX output on each request, so the same proxy process can serve both client
+families without a separate SymZilla service. Use a
+[network-enabled SymZilla](https://github.com/salvogendut/symapp-symzilla) on
+SymbOS 3 or newer with a compatible running Network Daemon. The tested MSX
+daemon is [symsys-networkdaemon-unapi](https://github.com/salvogendut/symsys-networkdaemon-unapi);
+on CPC, SymZilla can use `NETD-M4C`.
 
 Start the proxy:
 
@@ -34,8 +54,13 @@ The source launcher creates `venv/` and installs the project the first time it
 is used. It does not install or upgrade packages on every proxy restart.
 
 `--advertise-host` is the LAN address embedded in rewritten links. It is
-especially important on multihomed hosts. In `BROWSER.APP`, enter the resulting
-proxy URL, for example `http://192.168.1.10:5001`.
+especially important on multihomed hosts. Configure the resulting proxy address
+on each client:
+
+- in GEOBENCH's `BROWSER.APP`, open **Settings → Proxy** and enter the full
+  URL, for example `http://192.168.1.10:5001`;
+- in SymZilla, choose **Edit → Options...**, then enter `192.168.1.10:5001` or
+  the full URL in **Network / GB proxy**.
 
 The command listens on `127.0.0.1` by default. Binding to `0.0.0.0` deliberately
 exposes it to the local network.
@@ -50,12 +75,12 @@ venv/bin/python -m unittest discover -s tests -v
 
 On Windows, `start_macproxy.ps1` remains available for source-tree use.
 
-## GEOBENCH profile
+## GEOBENCH (`BROWSER.APP`) profile
 
 The `geobench` preset:
 
 - reduces pages to the HTML subset supported by `BROWSER.APP`;
-- retains links and GET/POST forms;
+- retains links and compact GET forms;
 - rewrites links and images to short proxy-local tokens;
 - downloads and converts images lazily;
 - bounds images to 160x96 pixels;
@@ -73,7 +98,7 @@ client can send `X-GBPC: 1` or omit the header; absent, malformed, and unknown
 offers safely retain the byte-compatible Mode-1 output. `X-GBPC` is consumed by
 the proxy and is not forwarded to upstream websites.
 
-## SymZilla DOX and SGX output
+## SymbOS (SymZilla) DOX and SGX output
 
 SymZilla support is selected per request and does not require a separate
 GB-proxy preset. The browser requests a DOX representation and advertises the
@@ -86,13 +111,14 @@ X-GB-SGX: 0,4
 
 The strict `X-GB-SGX` values are:
 
-- `0,2` for two colours in portable CPC packing;
-- `0,4` for four colours in portable CPC packing;
-- `5,16` for sixteen colours in MSX nibble packing.
+- `0,2` for two colours in SGX mode-0 packing;
+- `0,4` for four colours in SGX mode-0 packing;
+- `5,16` for sixteen colours in SGX mode-5 MSX packing.
 
-SymZilla derives this value from the active screen rather than just the host
-platform. A missing, malformed, or unsupported value safely defaults to
-`0,2`, so CPC and PCW modes are never sent more colours than they advertised.
+Compatible SymZilla builds derive this value from the active screen rather than
+just the host platform. GB-proxy honors the advertised profile; a missing,
+malformed, or unsupported value safely defaults to `0,2`. This keeps generated
+graphics within the capabilities reported by the client.
 
 GB-proxy converts the upstream page into a bounded DOX document containing
 `INFO`, `HEAD`, `TEXT`, `GRPH`, `LINK`, and `ENDF` chunks, plus an optional
@@ -107,6 +133,18 @@ Hidden values and checked radio/checkbox defaults are retained in the short
 action URL. POST forms, named submit values, and GET forms containing enabled
 named password, file, text-area, select, or other unsupported controls are
 omitted atomically; GB-proxy never emits a misleading partial form.
+Activate the displayed submit button to send a form; pressing Enter is not
+currently a submission shortcut.
+
+This is a deliberately constrained HTML-to-DOX conversion, not a complete web
+browser engine. It preserves useful text, headings, emphasis, links, supported
+images, and the bounded GET controls above. Scripts and styles are removed,
+complex layouts such as tables are flattened, and downloads, persistent login
+sessions, and arbitrary browser controls are outside the supported subset.
+
+SymZilla represents a proxy-generated link with a small eye icon after its
+plain-text label. Activate the icon to follow the link; the label itself is not
+the clickable control.
 
 Links use short proxy-local URLs because SymZilla history entries hold 127
 characters. Consequently, `--advertise-host` must be an address reachable from
@@ -138,14 +176,18 @@ venv/bin/python -m pip install --editable '.[anthropic]'
 Available extras are `openai`, `anthropic`, `gemini`, and `mistral`.
 SVG rendering uses the distribution-provided `rsvg-convert` utility. RPM
 installations include it automatically. For source installations, install
-`librsvg2-tools` on Fedora/EL or `librsvg2-bin` on Debian/Ubuntu. SVG rendering
-is optional; raster image conversion and GBPC output do not require it.
+`librsvg2-tools` on Fedora/EL or `librsvg2-bin` on Debian/Ubuntu. Without it,
+HTML/text and raster-image conversion to GBPC or SGX continue to work, but SVG
+images cannot be rendered.
 
 ## systemd service
 
-The RPM installs `gb-proxy.service` but does not enable it automatically.
+The RPM installs `gb-proxy.service` but does not enable it automatically. One
+service instance can serve both GEOBENCH and SymbOS/SymZilla; no separate
+SymZilla service is required.
 
-1. Edit `/etc/gb-proxy/config.py` and select the desired preset/extensions.
+1. Edit `/etc/gb-proxy/config.py`. Enable the `geobench` preset for GEOBENCH;
+   SymZilla needs no preset. Select any desired extensions for either client.
 2. Edit `/etc/sysconfig/gb-proxy`.
 3. For LAN access, set `GB_PROXY_HOST=0.0.0.0` and set
    `GB_PROXY_ADVERTISE_HOST` to the server's LAN address.
@@ -173,8 +215,10 @@ extension is known to be thread-safe and client isolation is not required.
 
 ## RPM build
 
-The application is pure Python and produces a `noarch` RPM. The spec targets
-Fedora and EL9-compatible systems with EPEL/CRB enabled.
+The application is pure Python and produces a `noarch` RPM. The spec is intended
+for native Fedora and EL9-compatible builds with EPEL/CRB enabled; CI validates
+Fedora 44. Automated GitHub releases are built on Fedora 44. `noarch` means
+CPU-independent, not independent of distribution package dependencies.
 
 Install the normal RPM build tools and the Python dependencies, then build a
 committed checkout with:
@@ -197,11 +241,14 @@ rpmbuild -ba gb-proxy.spec
 
 GitHub Actions also builds an RPM and source RPM for pushes to `master` and
 pull requests targeting `master`. Pushing a version tag creates or updates the
-corresponding GitHub Release and attaches both RPMs plus `SHA256SUMS`:
+corresponding GitHub Release and attaches both RPMs plus `SHA256SUMS`.
+
+After updating all version locations to the next release, tag that version. For
+example:
 
 ```shell
-git tag -a v0.2.0 -m "GB-proxy 0.2.0"
-git push origin v0.2.0
+git tag -a v0.3.0 -m "GB-proxy 0.3.0"
+git push origin v0.3.0
 ```
 
 The tag must have the form `vN.N.N` and match the versions in
@@ -251,7 +298,10 @@ The core proxy applies connect/read timeouts and response-size limits, uses a
 fresh upstream session per client request, bounds memory and disk caches, and
 does not write into its installed source tree.
 
-## Demonstration
+## Historical demonstration
+
+This inherited MacProxy demonstration illustrates the project's ancestry; it
+is not a demonstration of the current GEOBENCH or SymZilla integrations.
 
 <a href="https://youtu.be/f1v1gWLHcOk" target="_blank">
   <img src="./readme_images/youtube_thumbnail.jpg" alt="Teaching an Old Mac New Tricks" width="400">

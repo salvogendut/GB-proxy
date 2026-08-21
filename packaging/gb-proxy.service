@@ -1,5 +1,5 @@
 [Unit]
-Description=GB-proxy legacy browser HTTP proxy
+Description=GB-proxy for GEOBENCH and SymZilla on SymbOS
 Documentation=https://github.com/salvogendut/GB-proxy
 Wants=network-online.target
 After=network-online.target

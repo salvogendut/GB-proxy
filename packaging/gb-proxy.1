@@ -1,20 +1,37 @@
 .TH GB-PROXY 1 "August 2026" "GB-proxy 0.2.0" "User Commands"
 .SH NAME
-gb-proxy \- adapt modern web content for legacy web clients
+gb-proxy \- adapt modern web content for GEOBENCH and SymZilla
 .SH SYNOPSIS
 .B gb-proxy
 .RI [ options ]
 .SH DESCRIPTION
 .B gb-proxy
-is an extensible HTTP proxy for GEOBENCH and other constrained legacy web
-clients.  It simplifies HTML, rewrites links, and converts images into formats
-supported by early computers.
+is an extensible HTTP proxy with first-class integrations for both GEOBENCH and
+SymZilla on SymbOS.  It also retains inherited support for other constrained
+legacy web clients.  It simplifies HTML, rewrites links, and converts images
+into formats supported by early computers.
 .PP
 The packaged systemd service listens only on the loopback interface by default.
 Edit
 .I /etc/sysconfig/gb-proxy
 before exposing it to a trusted LAN.  The proxy is not intended to be exposed
 directly to the public Internet.
+.SH CLIENT SUPPORT
+GEOBENCH uses the
+.B geobench
+preset to receive simplified HTML and GBPC images in
+.BR BROWSER.APP .
+.PP
+SymZilla on SymbOS selects bounded DOX documents and SGX images per request; it
+does not require a separate preset.  It requires SymbOS 3 or newer, a
+network-enabled SymZilla build, and a compatible running Network Daemon.  A
+single proxy process can therefore serve both client families without a
+separate SymZilla service.
+.PP
+The clients contact GB-proxy over plain HTTP.  GB-proxy performs HTTP or HTTPS
+requests to upstream sites and returns client-specific converted content.  Its
+root URL is not a browsing interface; configure it as the client's proxy
+endpoint.
 .SH OPTIONS
 .TP
 .BI "--config " PATH

@@ -52,7 +52,7 @@ def _advertise_url(advertise_host, bind_host, port):
 def build_parser():
 	parser = argparse.ArgumentParser(
 		prog="gb-proxy",
-		description="Transcoding HTTP proxy for GEOBENCH and legacy web clients",
+		description="Transcoding HTTP proxy for GEOBENCH and SymZilla on SymbOS",
 	)
 	parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 	parser.add_argument(
