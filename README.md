@@ -272,7 +272,7 @@ dependencies, build a committed checkout with:
 Set `RPM_TOPDIR` or `DEB_OUTPUT_DIR` to choose another output directory. Either
 helper accepts a Git ref as its first argument and creates a source archive with
 `git archive`, so uncommitted changes are not included. Standard RPM tooling can
-also fetch the tagged sources declared by the spec:
+also fetch the release sources declared by the spec:
 
 ```shell
 spectool -g -R gb-proxy.spec
@@ -287,22 +287,10 @@ sudo apt install ./gb-proxy_0.3.0-1_all.deb
 ```
 
 GitHub Actions builds the binary and source RPMs plus the Debian package for
-pushes to `master` and pull requests targeting `master`. Pushing a version tag
-creates or updates the corresponding GitHub Release and attaches all three
-packages plus `SHA256SUMS`.
-
-After updating all version locations to the next release, tag that version. For
-example:
-
-```shell
-git tag -a v0.4.0 -m "GB-proxy 0.4.0"
-git push origin v0.4.0
-```
-
-The tag must have the form `vN.N.N` and match the versions in `gb-proxy.spec`,
-`setup.cfg`, `gb_proxy/__init__.py`, the manual page, and `debian/changelog`.
-Published RPM and Debian packages are currently unsigned; their SHA-256 digests
-are included for integrity checking.
+pushes to `master` and pull requests targeting `master`. Published GitHub
+Releases include the binary and source RPMs, the Debian package, and
+`SHA256SUMS`. The packages are currently unsigned; their SHA-256 digests are
+included for integrity checking.
 
 Package builds are offline after the declared sources and distribution packages
 have been obtained. Dependencies are never downloaded by the service.
