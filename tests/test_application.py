@@ -85,6 +85,21 @@ class ApplicationFactoryTests(unittest.TestCase):
 					else:
 						del config.MAX_MARKDOWN_SOURCE_BYTES
 
+	def test_factory_rejects_negative_direct_link_limit(self):
+		config = install_config()
+		had_value = hasattr(config, "MAX_DIRECT_LINK_URL_BYTES")
+		old_value = getattr(config, "MAX_DIRECT_LINK_URL_BYTES", None)
+		config.MAX_DIRECT_LINK_URL_BYTES = -1
+		try:
+			with tempfile.TemporaryDirectory() as directory:
+				with self.assertRaises(ConfigurationError):
+					create_app(config, cache_dir=directory, state_dir=directory)
+		finally:
+			if had_value:
+				config.MAX_DIRECT_LINK_URL_BYTES = old_value
+			else:
+				del config.MAX_DIRECT_LINK_URL_BYTES
+
 	def test_factory_does_not_clear_an_existing_cache(self):
 		with tempfile.TemporaryDirectory() as directory:
 			cache_dir = os.path.join(directory, "cache")
@@ -358,16 +373,12 @@ class MarkdownApplicationTests(unittest.TestCase):
 		response, calls = self._request(upstream, headers={"Accept": DOX_MIMETYPE})
 		chunks = validate_dox(response.data)
 		entry_length = struct.unpack_from("<H", chunks[b"LINK"], 1)[0]
-		short_url = chunks[b"LINK"][4:3 + entry_length].rstrip(b"\x00").decode("ascii")
-		link_token = short_url.rsplit("/", 1)[-1]
+		link_url = chunks[b"LINK"][4:3 + entry_length].rstrip(b"\x00").decode("ascii")
 
 		# One inline image plus the existing clickable-link marker graphic.
 		self.assertEqual(chunks[b"GRPH"][0], 2)
 		self.assertEqual(calls[1][1], image_url)
-		self.assertEqual(
-			resolve_resource("url", link_token).target,
-			"https://cdn.example.net/releases/guide.md",
-		)
+		self.assertEqual(link_url, "https://cdn.example.net/releases/guide.md")
 
 	def test_markdown_headers_are_rewritten_case_insensitively(self):
 		upstream = SimpleNamespace(
@@ -753,11 +764,25 @@ class SymzillaDoxApplicationTests(unittest.TestCase):
 		self.assertNotEqual(response.content_type, DOX_MIMETYPE)
 		self.assertEqual(calls[0][2]["headers"]["Accept"], accept)
 
-	def test_links_use_short_proxy_urls_but_retain_https_targets(self):
+	def test_short_links_retain_original_url_in_symzilla_documents(self):
+		upstream = SimpleNamespace(
+			content=b'<html><body><a href="https://destination.example/page">Destination</a></body></html>',
+			status_code=200,
+			headers={"Content-Type": "text/html"},
+			url="https://example.com/page",
+		)
+		response, _ = self._request(upstream, headers={"Accept": DOX_MIMETYPE})
+		links = validate_dox(response.data)[b"LINK"]
+		entry_length = struct.unpack_from("<H", links, 1)[0]
+		url = links[4:3 + entry_length].rstrip(b"\x00").decode("ascii")
+
+		self.assertEqual(url, "https://destination.example/page")
+
+	def test_oversized_links_use_short_proxy_urls_but_retain_https_targets(self):
+		target = "https://destination.example/" + "a" * 160
 		upstream = SimpleNamespace(
 			content=(
-				b'<html><body><a href="https://destination.example/a/very/long/path?'
-				b'query=abcdefghijklmnopqrstuvwxyz">Destination</a></body></html>'
+				f'<html><body><a href="{target}">Destination</a></body></html>'.encode()
 			),
 			status_code=200,
 			headers={"Content-Type": "text/html"},
@@ -773,7 +798,7 @@ class SymzillaDoxApplicationTests(unittest.TestCase):
 		self.assertTrue(url.startswith("http://127.0.0.1:5001/u/"))
 		self.assertEqual(
 			resolve_resource("url", token).target,
-			"https://destination.example/a/very/long/path?query=abcdefghijklmnopqrstuvwxyz",
+			target,
 		)
 
 	def test_get_form_action_is_shortened_with_static_defaults_intact(self):

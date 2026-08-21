@@ -129,6 +129,10 @@ ALLOWED_HTML_ATTRIBUTES = None
 # for clients with small URL buffers and also makes image conversion lazy.
 SHORTEN_LINK_URLS = False
 SHORT_IMAGE_URLS = False
+# When link shortening is enabled, preserve a direct plain-HTTP link if its
+# exact printable-ASCII URL fits this many bytes. Zero keeps shortening every
+# link. The GEOBENCH preset sets this to its 47-byte href limit.
+MAX_DIRECT_LINK_URL_BYTES = 0
 # Optional output bound for image alt text. Small clients can use this to keep
 # complete <img> tags inside their parser's fixed tag buffer.
 MAX_IMAGE_ALT_LENGTH = None

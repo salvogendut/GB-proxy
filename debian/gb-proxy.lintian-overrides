@@ -1,0 +1,10 @@
+# GB-proxy is released directly on GitHub rather than uploaded to Debian.
+initial-upload-closes-no-bugs
+
+# The configuration can contain API keys and is deliberately group-readable
+# only by the dedicated service account.
+non-standard-file-perm 0640 != 0644 [etc/gb-proxy/config.py]
+
+# This inherited extension template intentionally displays the remote service's
+# logo while the extension is active; it is not package documentation.
+privacy-breach-generic * [usr/lib/python3/dist-packages/extensions/kagi/template.html]

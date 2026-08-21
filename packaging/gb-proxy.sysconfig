@@ -1,6 +1,6 @@
 # The packaged service is local-only by default. To serve GEOBENCH or SymZilla
 # on SymbOS over a trusted LAN, set this to 0.0.0.0 and explicitly open the port
-# in firewalld.
+# in the host firewall.
 GB_PROXY_HOST=127.0.0.1
 GB_PROXY_PORT=5001
 # Several optional extensions retain process-global session state. Keep one

@@ -164,6 +164,16 @@ def _positive_setting(settings, name, default, converter=int):
 	return value
 
 
+def _nonnegative_setting(settings, name, default, converter=int):
+	try:
+		value = converter(getattr(settings, name, default))
+	except (TypeError, ValueError) as error:
+		raise ConfigurationError(f"{name} must be numeric") from error
+	if value < 0:
+		raise ConfigurationError(f"{name} must not be negative")
+	return value
+
+
 def create_app(
 	settings,
 	*,
@@ -226,6 +236,7 @@ def create_app(
 	app.config["MAX_CONTENT_LENGTH"] = _positive_setting(
 		settings, "MAX_CLIENT_REQUEST_BYTES", 1024 * 1024
 	)
+	_nonnegative_setting(settings, "MAX_DIRECT_LINK_URL_BYTES", 0)
 
 	max_entries = _positive_setting(settings, "RESOURCE_MAX_ENTRIES", 4096)
 	ttl_seconds = _positive_setting(settings, "RESOURCE_TTL_SECONDS", 3600)
@@ -845,6 +856,9 @@ def _process_response(
 			shorten_link_urls=getattr(settings, "SHORTEN_LINK_URLS", False),
 			short_image_urls=short_image_urls,
 			ascii_only=getattr(settings, "ASCII_ONLY", False),
+			max_direct_link_url_bytes=int(
+				getattr(settings, "MAX_DIRECT_LINK_URL_BYTES", 0)
+			),
 			max_image_alt_length=getattr(settings, "MAX_IMAGE_ALT_LENGTH", None),
 			gbpc_mode=gbpc_mode,
 		)

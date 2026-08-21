@@ -1,0 +1,7 @@
+gb-proxy (0.3.0-1) trixie; urgency=medium
+
+  * Render bounded, sanitized remote Markdown for GEOBENCH and SymZilla.
+  * Preserve readable original link URLs when they fit each client safely.
+  * Add an architecture-independent Debian package and tagged release build.
+
+ -- Salvatore Bognanni <salvogendut@users.noreply.github.com>  Fri, 21 Aug 2026 12:00:56 +0200

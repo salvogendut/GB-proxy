@@ -253,7 +253,7 @@ class DoxSerializationTests(unittest.TestCase):
 
 		document = build_dox_from_html(
 			"".join(
-				f'<a href="http://target.example/{number}">{number}</a>'
+				f'<a href="http://target.example/{"x" * 120}/{number}">{number}</a>'
 				for number in range(100)
 			),
 			"http://example.com/",
@@ -262,8 +262,45 @@ class DoxSerializationTests(unittest.TestCase):
 		)
 		chunks = validate_dox(document, limits=DoxLimits(max_links=1))
 
-		self.assertEqual(shortened, ["http://target.example/0"])
+		self.assertEqual(shortened, [f"http://target.example/{'x' * 120}/0"])
 		self.assertEqual(chunks[b"LINK"][0], 1)
+
+	def test_short_links_are_kept_original_without_registering_proxy_tokens(self):
+		shortened = []
+		document = build_dox_from_html(
+			'<a href="https://example.com/next">Next</a>',
+			"https://example.com/start",
+			link_shortener=lambda url: shortened.append(url) or "http://proxy/u/x",
+		)
+		links = validate_dox(document)[b"LINK"]
+
+		self.assertEqual(shortened, [])
+		self.assertIn(b"\x00https://example.com/next\x00", links)
+
+	def test_direct_link_limit_is_exact_and_unsafe_urls_are_shortened(self):
+		prefix = "https://example.com/"
+		at_limit = prefix + "a" * (127 - len(prefix))
+		over_limit = at_limit + "b"
+		unsafe = "https://example.com/a%20b".replace("%20", " ")
+		shortened = []
+
+		def shorten(url):
+			shortened.append(url)
+			return f"http://p/u/{len(shortened)}"
+
+		document = build_dox_from_html(
+			f'<a href="{at_limit}">Fits</a>'
+			f'<a href="{over_limit}">Long</a>'
+			f'<a href="{unsafe}">Unsafe</a>',
+			"https://example.com/start",
+			link_shortener=shorten,
+		)
+		links = validate_dox(document)[b"LINK"]
+
+		self.assertIn(b"\x00" + at_limit.encode("ascii") + b"\x00", links)
+		self.assertEqual(shortened, [over_limit, unsafe])
+		self.assertIn(b"\x00http://p/u/1\x00", links)
+		self.assertIn(b"\x00http://p/u/2\x00", links)
 
 	def test_nested_link_image_is_clickable_without_extra_fallback_icon(self):
 		image = _png((0, 1, 0, 1, 1, 0, 1, 0), 8)

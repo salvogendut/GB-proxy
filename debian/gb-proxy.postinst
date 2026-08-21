@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+if ! getent group gb-proxy >/dev/null; then
+	addgroup --system --quiet gb-proxy
+fi
+if ! getent passwd gb-proxy >/dev/null; then
+	adduser --system --quiet --ingroup gb-proxy \
+		--home /var/lib/gb-proxy --no-create-home \
+		--shell /usr/sbin/nologin gb-proxy
+fi
+
+if [ -f /etc/gb-proxy/config.py ] && \
+		! dpkg-statoverride --list /etc/gb-proxy/config.py >/dev/null 2>&1; then
+	chown root:gb-proxy /etc/gb-proxy/config.py
+	chmod 0640 /etc/gb-proxy/config.py
+fi
+
+#DEBHELPER#
+
+exit 0

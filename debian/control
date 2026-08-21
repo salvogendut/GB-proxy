@@ -1,0 +1,38 @@
+Source: gb-proxy
+Section: web
+Priority: optional
+Maintainer: Salvatore Bognanni <salvogendut@users.noreply.github.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-sequence-python3,
+ pybuild-plugin-pyproject,
+ python3-all,
+ python3-setuptools,
+ python3-wheel,
+ python3-flask,
+ python3-werkzeug,
+ python3-bs4,
+ python3-html5lib,
+ python3-markdown (>= 3.3.6),
+ python3-pil,
+ python3-requests,
+ python3-waitress,
+Standards-Version: 4.7.2.0
+Rules-Requires-Root: no
+Homepage: https://github.com/salvogendut/GB-proxy
+Vcs-Git: https://github.com/salvogendut/GB-proxy.git
+Vcs-Browser: https://github.com/salvogendut/GB-proxy
+
+Package: gb-proxy
+Architecture: all
+Depends:
+ ${misc:Depends},
+ ${python3:Depends},
+ adduser,
+ ca-certificates,
+ librsvg2-bin,
+Description: transcoding HTTP proxy for GEOBENCH and SymZilla
+ GB-proxy is an extensible HTTP proxy with first-class integrations for both
+ GEOBENCH and SymZilla on SymbOS. It simplifies HTML, renders remote Markdown,
+ preserves bounded links, and converts images into formats supported by early
+ computers.
