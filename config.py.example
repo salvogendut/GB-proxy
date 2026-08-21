@@ -38,6 +38,10 @@ IMAGE_REQUEST_TIMEOUT = 30
 SVG_CONVERSION_TIMEOUT = 10
 MAX_CLIENT_REQUEST_BYTES = 1024 * 1024
 MAX_UPSTREAM_RESPONSE_BYTES = 16 * 1024 * 1024
+# Markdown is parsed only up to this source-size limit.  The lower dedicated
+# bound limits parser memory and CPU use before the result is reduced to the
+# much smaller output formats supported by legacy clients.
+MAX_MARKDOWN_SOURCE_BYTES = 1 * 1024 * 1024
 MAX_IMAGE_DOWNLOAD_BYTES = 16 * 1024 * 1024
 MAX_IMAGE_CACHE_BYTES = 512 * 1024 * 1024
 MAX_IMAGE_CACHE_FILES = 4096

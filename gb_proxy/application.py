@@ -30,6 +30,11 @@ from utils.image_utils import (
 	image_mimetype,
 	is_image_url,
 )
+from utils.markdown_utils import (
+	MarkdownSafetyError,
+	is_markdown_response,
+	markdown_to_html,
+)
 from utils.resource_registry import configure_resources, register_resource, resolve_resource
 from utils.system_utils import ConfigurationError, apply_preset
 
@@ -42,7 +47,7 @@ _EXTENSION_NAME = re.compile(r"^[A-Za-z0-9_]+$")
 _GBPC_REQUEST_HEADER = "X-GBPC"
 _SGX_REQUEST_HEADER = "X-GB-SGX"
 _STANDARD_UPSTREAM_ACCEPT = (
-	"text/html, application/xhtml+xml, image/*;q=0.8, */*;q=0.1"
+	"text/html, application/xhtml+xml, text/markdown;q=0.9, image/*;q=0.8, */*;q=0.1"
 )
 
 
@@ -97,6 +102,7 @@ class ProxyRuntime:
 	session_factory: object
 	request_timeout: tuple
 	max_response_bytes: int
+	max_markdown_source_bytes: int
 	dox_limits: DoxLimits
 	extensions: dict
 	domain_to_extension: dict
@@ -228,6 +234,7 @@ def create_app(
 	)
 	for name, default in (
 		("MAX_UPSTREAM_RESPONSE_BYTES", 16 * 1024 * 1024),
+		("MAX_MARKDOWN_SOURCE_BYTES", 1024 * 1024),
 		("MAX_IMAGE_DOWNLOAD_BYTES", 16 * 1024 * 1024),
 		("MAX_IMAGE_CACHE_BYTES", 512 * 1024 * 1024),
 		("MAX_IMAGE_CACHE_FILES", 4096),
@@ -299,6 +306,9 @@ def create_app(
 		),
 		max_response_bytes=_positive_setting(
 			settings, "MAX_UPSTREAM_RESPONSE_BYTES", 16 * 1024 * 1024
+		),
+		max_markdown_source_bytes=_positive_setting(
+			settings, "MAX_MARKDOWN_SOURCE_BYTES", 1024 * 1024
 		),
 		dox_limits=dox_limits,
 		extensions=extensions,
@@ -454,6 +464,15 @@ def _read_upstream_content(response, limit):
 	return content
 
 
+def _header_value(headers, name):
+	"""Return one header value from an ordinary or case-insensitive mapping."""
+	name = name.lower()
+	return next(
+		(str(value) for key, value in headers.items() if str(key).lower() == name),
+		"",
+	)
+
+
 def _prepare_headers(dox_requested=False):
 	headers = {"User-Agent": USER_AGENT}
 	if dox_requested:
@@ -505,12 +524,19 @@ def _handle_target_request(
 			append_query=append_query,
 			dox_requested=sgx_profile is not None,
 		)
-		content = _read_upstream_content(response, runtime.max_response_bytes)
-		result = (content, response.status_code, dict(response.headers))
+		final_url = getattr(response, "url", url)
+		response_headers = dict(response.headers)
+		read_limit = runtime.max_response_bytes
+		if is_markdown_response(
+			_header_value(response_headers, "Content-Type"), final_url
+		):
+			read_limit = min(read_limit, runtime.max_markdown_source_bytes)
+		content = _read_upstream_content(response, read_limit)
+		result = (content, response.status_code, response_headers)
 		return _process_response(
 			runtime,
 			result,
-			getattr(response, "url", url),
+			final_url,
 			gbpc_mode=gbpc_mode,
 			sgx_profile=sgx_profile,
 		)
@@ -529,6 +555,10 @@ def _handle_target_request(
 				runtime, 502, "Response too large", str(error), sgx_profile, url,
 			)
 		return abort(502, "Upstream response is too large")
+	except HTTPException:
+		# Preserve deliberate processing errors raised with Flask's abort().
+		# The generic handler below is only for unexpected proxy failures.
+		raise
 	except requests.RequestException:
 		current_app.logger.exception("Upstream request failed for %s", url)
 		if sgx_profile is not None:
@@ -689,7 +719,8 @@ def _process_response(
 			status_code = 200
 			headers = {}
 	elif isinstance(response, (Response, WerkzeugResponse)):
-		if sgx_profile is None:
+		response_content_type = _header_value(response.headers, "Content-Type")
+		if sgx_profile is None and not is_markdown_response(response_content_type, url):
 			return response
 		content = response.get_data()
 		status_code = response.status_code
@@ -699,10 +730,43 @@ def _process_response(
 		status_code = 200
 		headers = {}
 
-	content_type = next(
-		(value for key, value in headers.items() if key.lower() == "content-type"),
-		"",
-	).lower()
+	content_type = _header_value(headers, "Content-Type")
+	if is_markdown_response(content_type, url):
+		content_size = (
+			len(content.encode("utf-8")) if isinstance(content, str) else len(content)
+		)
+		if content_size > runtime.max_markdown_source_bytes:
+			message = (
+				"Markdown source exceeds the "
+				f"{runtime.max_markdown_source_bytes}-byte limit"
+			)
+			if sgx_profile is not None:
+				return _dox_error_response(
+					runtime, 502, "Response too large", message, sgx_profile, url
+				)
+			return abort(502, message)
+		try:
+			content = markdown_to_html(content, content_type, url)
+		except MarkdownSafetyError as error:
+			if sgx_profile is not None:
+				return _dox_error_response(
+					runtime,
+					502,
+					"Markdown too complex",
+					str(error),
+					sgx_profile,
+					url,
+				)
+			return abort(502, str(error))
+		headers = {
+			key: value
+			for key, value in headers.items()
+			if str(key).lower() not in ("content-disposition", "content-type")
+		}
+		headers["Content-Type"] = "text/html; charset=utf-8"
+		content_type = headers["Content-Type"]
+
+	content_type = content_type.lower()
 	if sgx_profile is not None:
 		return _dox_response(
 			runtime,
