@@ -2,10 +2,11 @@
 
 <#
 .SYNOPSIS
-	Windows-compatible script to set up and launch Macproxy Plus
+	Windows-compatible script to set up and launch GB-proxy
 
 .DESCRIPTION
-	This script does the following:
+	This script sets up GB-proxy for GEOBENCH, SymZilla on SymbOS, and other
+	legacy clients. It does the following:
 	1. Checks that Python and the venv module are installed.
 	2. Creates and/or validates a virtual environment.
 	3. Installs required Python packages (from requirements.txt and any enabled extensions).
@@ -69,7 +70,7 @@ if (Test-Path $venvPath) {
 
 # Create the venv if it doesn't exist
 if (-not (Test-Path $venvPath)) {
-	Write-Host "Creating python venv for Macproxy Plus..."
+	Write-Host "Creating python venv for GB-proxy..."
 	python -m venv venv
 	Write-Host "Activating venv..."
 	. (Join-Path $venvPath "Scripts\Activate.ps1")
@@ -109,8 +110,8 @@ else {
 	Write-Host "No additional requirements for enabled extensions."
 }
 
-# Start Macproxy Plus
-Write-Host "Starting Macproxy Plus..."
+# Start GB-proxy
+Write-Host "Starting GB-proxy..."
 if ($Port) {
 	python proxy.py --port $Port
 }

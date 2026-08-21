@@ -1,5 +1,6 @@
-# The packaged service is local-only by default. To serve vintage machines on
-# a trusted LAN, set this to 0.0.0.0 and explicitly open the port in firewalld.
+# The packaged service is local-only by default. To serve GEOBENCH or SymZilla
+# on SymbOS over a trusted LAN, set this to 0.0.0.0 and explicitly open the port
+# in firewalld.
 GB_PROXY_HOST=127.0.0.1
 GB_PROXY_PORT=5001
 # Several optional extensions retain process-global session state. Keep one
@@ -12,6 +13,7 @@ GB_PROXY_CONFIG=/etc/gb-proxy/config.py
 GB_PROXY_CACHE_DIR=/var/cache/gb-proxy
 GB_PROXY_STATE_DIR=/var/lib/gb-proxy
 
-# Public host name or address used when GB-proxy emits links back to itself.
-# If unset, GB-proxy derives it from the listening address.
+# Advertised host name or LAN address used when GB-proxy emits links to itself.
+# GEOBENCH and SymZilla must be able to reach it from their legacy machines. If
+# unset, GB-proxy derives it from the listening address.
 # GB_PROXY_ADVERTISE_HOST=proxy.example.test

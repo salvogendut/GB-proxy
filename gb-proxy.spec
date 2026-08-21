@@ -1,7 +1,7 @@
 Name:           gb-proxy
 Version:        0.2.0
 Release:        1%{?dist}
-Summary:        HTTP proxy for GEOBENCH and other legacy web clients
+Summary:        HTTP proxy for GEOBENCH and SymZilla on SymbOS
 
 License:        BSD-3-Clause
 URL:            https://github.com/salvogendut/GB-proxy
@@ -16,9 +16,10 @@ Requires:       /usr/bin/rsvg-convert
 %{?sysusers_requires_compat}
 
 %description
-GB-proxy is an extensible HTTP proxy that adapts modern web content for
-GEOBENCH and other early computers. It simplifies HTML, rewrites links, and
-converts images into formats suitable for constrained legacy web clients.
+GB-proxy is an extensible HTTP proxy with first-class integrations for both
+GEOBENCH and SymZilla on SymbOS. It also retains inherited support for other
+constrained legacy web clients. It simplifies HTML, rewrites links, and
+converts images into formats suitable for early computers.
 
 
 %generate_buildrequires
@@ -78,9 +79,10 @@ install -Dpm 0640 config.py.example %{buildroot}%{_sysconfdir}/%{name}/config.py
 
 
 %changelog
-* Sun Aug 16 2026 Salvatore Bognanni <salvogendut@users.noreply.github.com> - 0.2.0-1
+* Thu Aug 20 2026 Salvatore Bognanni <salvogendut@users.noreply.github.com> - 0.2.0-1
 - Negotiate 16-colour GBPC Mode-7 images with MSX Screen-7 clients
 - Preserve portable four-colour Mode 1 for other clients and low-memory fallback
+- Add negotiated DOX/SGX pages, images, links, and GET forms for SymZilla on SymbOS
 
 * Tue Jul 14 2026 Salvatore Bognanni <salvogendut@users.noreply.github.com> - 0.1.1-1
 - Render SVG images with the distribution-provided rsvg-convert utility

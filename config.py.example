@@ -72,9 +72,11 @@ WHITELISTED_DOMAINS = [
 ]
 
 # Optionally, load a preset (.py file) from /presets, optimized for compatibility
-# with a specific web browser. Enabling a preset may override one or more of the
-# settings that follow below.
-# The default values target compatability with the MacWeb 2.0 browser.
+# with a specific web browser. GEOBENCH uses the "geobench" preset. SymZilla on
+# SymbOS negotiates DOX/SGX output per request and does not require a preset, so
+# one proxy instance can serve both clients. Enabling a preset may override one
+# or more of the settings that follow below.
+# The default values target compatibility with the MacWeb 2.0 browser.
 #PRESET = "wii_internet_channel"
 #PRESET = "geobench"
 
@@ -144,8 +146,10 @@ CONVERT_IMAGES_TO_FILETYPE = "gif" # Only used if CONVERT_IMAGES is True
 DITHERING_ALGORITHM = "FLOYDSTEINBERG" # Only used if CONVERT_IMAGES is True and CONVERT_IMAGES_TO_FILETYPE == "gif"
 # With "pic" output, clients may advertise X-GBPC: 7,1 for GEOBENCH's
 # 16-colour MSX Screen-7 encoding. Missing or unsupported offers use Mode 1.
+# SymZilla negotiates DOX/SGX colour and packing separately with its Accept and
+# X-GB-SGX request headers.
 
-# In addition to the default web simulator prompt, add custom instructions to improve compatability with your web browser.
+# In addition to the default web simulator prompt, add custom instructions to improve compatibility with your web browser.
 WEB_SIMULATOR_PROMPT_ADDENDUM = """<formatting>
 IMPORTANT: The user's web browser only supports (most of) HTML 3.2 (you do not need to acknowledge this to the user, only understand it and use this knowledge to construct the HTML you respond with).
 Their browser has NO CSS support and NO JavaScript support. Never include <script>, <style> or inline scripting or styling in your responses. The output html will always be rendered as black on a white background, and there's no need to try to change this.
@@ -168,7 +172,7 @@ Never use script tags or style tags.
 # Conditionally enable/disable use of CONVERSION_TABLE
 CONVERT_CHARACTERS = True
 
-# Convert text characters for compatability with specific browsers
+# Convert text characters for compatibility with specific browsers
 CONVERSION_TABLE = {
 	"¢": b"cent",
 	"&cent;": b"cent",
