@@ -115,8 +115,10 @@ For compatibility with simple file servers, a URL path ending in `.md` or
 
 The supported safe subset includes headings, paragraphs, ordered and unordered
 lists, emphasis, code spans and blocks, tables, links, and remote images.
-GEOBENCH retains simple table markup; SymZilla renders the cell content in
-reading order rather than as a grid.
+GEOBENCH retains simple table markup. SymZilla renders rectangular tables with
+two to four columns and text or inline-link cells as framed DOX grids. Tables
+containing images or block content, and wider, nested, spanned, or ragged
+tables, fall back atomically to cell content in reading order.
 Relative link and image destinations are resolved against the final remote
 document URL after redirects. Remote HTTP or HTTPS images then pass through the
 same download, size, conversion, and colour limits as images in HTML pages.
@@ -173,9 +175,10 @@ currently a submission shortcut.
 
 This is a deliberately constrained HTML-to-DOX conversion, not a complete web
 browser engine. It preserves useful text, headings, emphasis, links, supported
-images, and the bounded GET controls above. Scripts and styles are removed,
-complex layouts such as tables are flattened, and downloads, persistent login
-sessions, and arbitrary browser controls are outside the supported subset.
+images, simple framed tables, and the bounded GET controls above. Scripts and
+styles are removed; tables with merged cells or other complex layout are
+flattened; and downloads, persistent login sessions, and arbitrary browser
+controls are outside the supported subset.
 
 SymZilla represents a proxy-generated link with a small eye icon after its
 plain-text label. Activate the icon to follow the link; the label itself is not

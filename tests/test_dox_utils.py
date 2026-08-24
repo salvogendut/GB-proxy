@@ -154,6 +154,164 @@ class DoxSerializationTests(unittest.TestCase):
 		self.assertIn(b"World", chunks[b"TEXT"])
 		self.assertNotIn(b"SECRET", chunks[b"TEXT"])
 
+	def test_simple_table_has_exact_current_symzilla_column_vector(self):
+		document = build_dox_from_html(
+			("<table><tr><th>A</th><th>B</th></tr>"
+			 "<tr><td>1</td><td>2</td></tr></table>"),
+			"http://example.com/",
+		)
+		text = validate_dox(document)[b"TEXT"]
+
+		self.assertEqual(text, bytes.fromhex(
+			"ff 12 "
+			"0e 16 00 05 01 01 02 ff ff 02 02 33 23 13 "
+			"02 03 01 41 02 01 01 00 "
+			"0e 16 00 03 01 02 02 ff ff 02 02 33 23 13 "
+			"02 03 01 42 02 01 01 00 00 "
+			"ff 12 "
+			"0e 10 00 05 01 01 02 ff ff 02 02 33 23 13 31 00 "
+			"0e 10 00 03 01 02 02 ff ff 02 02 33 23 13 32 00 00 "
+			"04 02 01 01 00 ff"
+		))
+
+	def test_four_column_geometry_uses_marked_signed_coefficients(self):
+		document = build_dox_from_html(
+			"<table><tr>" + "".join(f"<td>{value}</td>" for value in "ABCD")
+			+ "</tr></table>",
+			"http://example.com/",
+		)
+		text = validate_dox(document)[b"TEXT"]
+		offset = 2
+		geometries = []
+		for _ in range(4):
+			geometries.append(text[offset + 3:offset + 11])
+			offset += struct.unpack_from("<H", text, offset + 1)[0]
+
+		self.assertEqual(geometries, [
+			bytes.fromhex("05 01 01 04 ff ff 02 04"),
+			bytes.fromhex("03 01 02 04 ff ff 02 04"),
+			bytes.fromhex("01 01 03 04 ff ff 02 04"),
+			bytes.fromhex("ff ff 04 04 ff ff 02 04"),
+		])
+
+	def test_table_boundaries_preserve_surrounding_standard_text(self):
+		document = build_dox_from_html(
+			("<p>Before</p><table><tr><td>Left</td><td>Right</td></tr></table>"
+			 "<p>After</p>"),
+			"http://example.com/",
+		)
+		text = validate_dox(document)[b"TEXT"]
+
+		self.assertLess(text.index(b"Before"), text.index(b"\xff\x12"))
+		self.assertLess(text.index(b"\xff\x12"), text.index(b"After"))
+		self.assertIn(b"\x04\x02\x01\x01\x00\x00\xff\x12", text)
+
+	def test_inline_table_links_keep_the_existing_clickable_icon(self):
+		document = build_dox_from_html(
+			("<table><tr><td><a href='/left'>Left</a></td>"
+			 "<td><strong>Right</strong></td></tr></table>"),
+			"https://example.com/start",
+		)
+		chunks = validate_dox(document)
+
+		self.assertEqual(chunks[b"LINK"][0], 1)
+		self.assertIn(b"\x00https://example.com/left\x00", chunks[b"LINK"])
+		self.assertIn(bytes((10, 2, 1, 0x80, 1, 1, 5, 1)), chunks[b"TEXT"])
+		self.assertIn(b"\x02\x03\x01Right\x02\x01\x01", chunks[b"TEXT"])
+
+	def test_unsupported_tables_fall_back_wholly_in_source_order(self):
+		cases = (
+			("<table><tr><td colspan='2'>A</td><td>B</td></tr></table>", (b"A", b"B")),
+			(
+				"<table><tr><td>A</td><td>B</td></tr><tr><td>C</td></tr></table>",
+				(b"A", b"B", b"C"),
+			),
+			(
+				"<table><tr>" + "".join(f"<td>{value}</td>" for value in "ABCDE")
+				+ "</tr></table>",
+				tuple(value.encode("ascii") for value in "ABCDE"),
+			),
+			(
+				("<table><tr><td>Outer<table><tr><td>Inner</td><td>Grid</td></tr>"
+				 "</table></td><td>End</td></tr></table>"),
+				(b"Outer", b"Inner", b"Grid", b"End"),
+			),
+			(
+				("<table><tr><td><img src='/x.png' alt='Picture'></td>"
+				 "<td>End</td></tr></table>"),
+				(b"Picture", b"End"),
+			),
+		)
+		for html, labels in cases:
+			with self.subTest(html=html):
+				document = build_dox_from_html(html, "http://example.com/")
+				text = validate_dox(document)[b"TEXT"]
+				self.assertNotIn(b"\xff\x12", text)
+				positions = [text.index(label) for label in labels]
+				self.assertEqual(positions, sorted(positions))
+
+	def test_image_table_fallback_keeps_the_existing_sgx_conversion(self):
+		requests = []
+		document = build_dox_from_html(
+			("<table><tr><td><img src='/picture.png' alt='Picture'></td>"
+			 "<td>Caption</td></tr></table>"),
+			"http://example.com/",
+			image_fetcher=lambda url: requests.append(url) or _png((0, 1) * 4, 8),
+		)
+		chunks = validate_dox(document)
+
+		self.assertEqual(requests, ["http://example.com/picture.png"])
+		self.assertNotIn(b"\xff\x12", chunks[b"TEXT"])
+		self.assertEqual(chunks[b"GRPH"][0], 1)
+		self.assertIn(bytes((10, 2, 1, 0x80, 0, 1, 5, 1)), chunks[b"TEXT"])
+		self.assertIn(b"Caption", chunks[b"TEXT"])
+
+	def test_table_near_text_limit_falls_back_without_a_partial_column_row(self):
+		limits = DoxLimits(max_text_bytes=64)
+		document = build_dox_from_html(
+			("<table><tr><td>" + "A" * 40 + "</td><td>" + "B" * 40
+			 + "</td></tr></table>"),
+			"http://example.com/",
+			limits=limits,
+		)
+		text = validate_dox(document, limits=limits)[b"TEXT"]
+
+		self.assertNotIn(b"\xff\x12", text)
+		self.assertLessEqual(len(text), 64)
+
+	def test_table_row_and_cell_policy_limits_use_the_same_atomic_fallback(self):
+		html = (
+			"<table><tr><td>A</td><td>B</td></tr>"
+			"<tr><td>C</td><td>D</td></tr></table>"
+		)
+		for limits in (
+			DoxLimits(max_table_rows=1),
+			DoxLimits(max_table_cells=3),
+		):
+			with self.subTest(limits=limits):
+				text = validate_dox(
+					build_dox_from_html(html, "http://example.com/", limits=limits),
+					limits=limits,
+				)[b"TEXT"]
+				self.assertNotIn(b"\xff\x12", text)
+				self.assertLess(text.index(b"A"), text.index(b"D"))
+
+	def test_adjacent_tables_share_document_limits_without_invalidating_output(self):
+		limits = DoxLimits(max_table_rows=2, max_table_cells=4)
+		document = build_dox_from_html(
+			("<table><tr><td>A</td><td>B</td></tr></table>"
+			 "<table><tr><td>C</td><td>D</td></tr>"
+			 "<tr><td>E</td><td>F</td></tr></table>"),
+			"http://example.com/",
+			limits=limits,
+		)
+		text = validate_dox(document, limits=limits)[b"TEXT"]
+
+		self.assertEqual(text.count(b"\xff\x12"), 1)
+		self.assertEqual([text.index(value) for value in b"ABCDEF"], sorted(
+			text.index(value) for value in b"ABCDEF"
+		))
+
 	def test_links_are_bounded_and_get_clickable_icon_graphic(self):
 		document = build_dox_from_html(
 			'<p><a href="https://example.com/next">Next</a></p>',
@@ -571,6 +729,52 @@ class DoxSerializationTests(unittest.TestCase):
 		duplicate_ctrl = _insert_before_end(document, b"CTRL", ctrl)
 		with self.assertRaisesRegex(DoxValidationError, "Duplicate DOX chunk CTRL"):
 			validate_dox(duplicate_ctrl)
+
+	def test_validator_rejects_corrupt_table_headers_geometry_and_jumps(self):
+		document = build_dox_from_html(
+			("<table><tr><td>A</td><td>B</td></tr>"
+			 "<tr><td>C</td><td>D</td></tr></table>"),
+			"http://example.com/",
+		)
+		text = validate_dox(document)[b"TEXT"]
+		mutations = []
+
+		bad_count = bytearray(text)
+		bad_count[1] = 0x11
+		mutations.append((bad_count, "column count"))
+		bad_header = bytearray(text)
+		bad_header[2] = 13
+		mutations.append((bad_header, "header length"))
+		bad_divisor = bytearray(text)
+		bad_divisor[8] = 0
+		mutations.append((bad_divisor, "geometry"))
+		inside_header = bytearray(text)
+		inside_header[3:5] = b"\x01\x00"
+		mutations.append((inside_header, "inside its header"))
+		past_text = bytearray(text)
+		past_text[3:5] = b"\xff\xff"
+		mutations.append((past_text, "past TEXT"))
+		missed_terminator = bytearray(text)
+		first_target = 2 + struct.unpack_from("<H", text, 3)[0]
+		missed_terminator[first_target - 1] = ord("X")
+		mutations.append((missed_terminator, "column jump"))
+		bad_follow = bytearray(text)
+		separator = text.index(b"\x00\x00\xff\x12")
+		bad_follow[separator + 1] = 1
+		mutations.append((bad_follow, "continuation"))
+
+		for mutated, message in mutations:
+			with self.subTest(message=message), self.assertRaisesRegex(
+				DoxValidationError, message
+			):
+				validate_dox(_replace_chunk(document, b"TEXT", bytes(mutated)))
+
+	def test_table_limits_reject_unsafe_native_column_counts(self):
+		for columns in (1, 16):
+			with self.subTest(columns=columns), self.assertRaisesRegex(
+				ValueError, "between 2 and 15"
+			):
+				DoxLimits(max_table_columns=columns)
 
 	def test_validator_rejects_corrupt_chunk_length(self):
 		document = bytearray(build_dox_from_html("<p>ok</p>", "http://example.com/"))

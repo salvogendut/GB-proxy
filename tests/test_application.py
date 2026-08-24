@@ -285,6 +285,26 @@ class MarkdownApplicationTests(unittest.TestCase):
 			calls[0][2]["headers"]["Accept"],
 		)
 
+	def test_markdown_pipe_table_uses_framed_dox_columns(self):
+		upstream = SimpleNamespace(
+			content=(
+				b"| Name | Value |\n"
+				b"| --- | --- |\n"
+				b"| Alpha | 1 |\n"
+			),
+			status_code=200,
+			headers={"Content-Type": "text/markdown"},
+			url="https://example.com/docs/readme.md",
+		)
+
+		response, _ = self._request(upstream, headers={"Accept": DOX_MIMETYPE})
+		text = validate_dox(response.data)[b"TEXT"]
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(text.count(b"\xff\x12"), 2)
+		self.assertIn(b"Name", text)
+		self.assertIn(b"Alpha", text)
+
 	def test_plain_text_markdown_suffix_converts_but_txt_stays_plain(self):
 		markdown = SimpleNamespace(
 			content=b"# Suffix detection",

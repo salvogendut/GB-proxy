@@ -34,6 +34,7 @@ DOX_MAX_CONTROL_VALUE_BYTES = 63
 DOX_MAX_CONTROL_LABEL_BYTES = 31
 DOX_DOCUMENT_OVERHEAD_RESERVE = 192
 _TEXT_TRAILER = b"\x04\x02\x01\x01\x00\xff"
+_TEXT_FORMAT_RESET = _TEXT_TRAILER[:-2]
 _FORM_MARKER_SUFFIX = b"\x80\x00\x01\x05\x01"
 _CHUNK_NAMES = (b"INFO", b"HEAD", b"TEXT", b"GRPH", b"LINK", b"CTRL", b"ENDF")
 _REQUIRED_CHUNKS = frozenset((b"INFO", b"HEAD", b"TEXT", b"GRPH", b"LINK", b"ENDF"))
@@ -51,6 +52,13 @@ _REMOVED_TAGS = frozenset((
 	"applet", "audio", "canvas", "embed", "iframe", "link", "noscript", "object",
 	"script", "source", "style", "template", "video",
 ))
+_TABLE_INLINE_TAGS = frozenset((
+	"a", "abbr", "b", "bdi", "bdo", "br", "cite", "code", "data", "del",
+	"dfn", "em", "i", "ins", "kbd", "mark", "q", "s", "samp", "small",
+	"span", "strong", "sub", "sup", "time", "u", "var", "wbr",
+))
+_TABLE_COLUMN_HEADER_BYTES = 14
+_TABLE_CELL_STYLE = b"\x33\x23\x13"
 
 
 class DoxError(ValueError):
@@ -112,6 +120,9 @@ class DoxLimits:
 	max_image_source_bytes: int = 2 * 1024 * 1024
 	max_image_pixels: int = 16 * 1024 * 1024
 	max_url_bytes: int = 127
+	max_table_columns: int = 4
+	max_table_rows: int = 64
+	max_table_cells: int = 256
 
 	def __post_init__(self):
 		for name, value in self.__dict__.items():
@@ -140,6 +151,8 @@ class DoxLimits:
 			raise ValueError("SymZilla SGX5 images must fit one 16K memory area")
 		if self.max_url_bytes > 127:
 			raise ValueError("SymZilla history holds at most 127 URL bytes")
+		if not 2 <= self.max_table_columns <= 15:
+			raise ValueError("SymZilla tables must allow between 2 and 15 columns")
 		if (
 			self.max_document_bytes
 			< self.max_text_bytes + self.max_control_bytes + DOX_DOCUMENT_OVERHEAD_RESERVE
@@ -153,6 +166,26 @@ def _chunk(name, payload):
 	if name not in _CHUNK_NAMES:
 		raise ValueError(f"Unsupported DOX chunk {name!r}")
 	return name + struct.pack("<I", len(payload)) + payload
+
+
+def _dox_fixed(value):
+	"""Encode a signed 14-bit DOX column constant using marked 7-bit bytes."""
+	if not -8192 <= value <= 8191:
+		raise ValueError("DOX column constant exceeds its signed 14-bit range")
+	value &= 0x3fff
+	return bytes((
+		((value & 0x7f) << 1) | 1,
+		(((value >> 7) & 0x7f) << 1) | 1,
+	))
+
+
+def _table_column_header(column, count):
+	return (
+		bytes((_TABLE_COLUMN_HEADER_BYTES, 0, 0))
+		+ _dox_fixed(2 - column) + bytes((column + 1, count))
+		+ _dox_fixed(-1) + bytes((2, count))
+		+ _TABLE_CELL_STYLE
+	)
 
 
 def _ascii(value, *, limit=None):
@@ -260,6 +293,10 @@ class _DoxBuilder:
 		self._linked_graphic_insertions = 0
 		self._image_fetches = 0
 		self._image_conversions = 0
+		self._standard_paragraph_open = False
+		self._table_fallback_depth = 0
+		self._table_rows = 0
+		self._table_cells = 0
 
 	def _append_control(self, data):
 		if (
@@ -268,6 +305,7 @@ class _DoxBuilder:
 		):
 			return False
 		self.text.extend(data)
+		self._standard_paragraph_open = True
 		return True
 
 	def append_text(self, value, *, preserve=False):
@@ -282,7 +320,9 @@ class _DoxBuilder:
 		value = re.sub(r"\s+", " ", value)
 		if not value:
 			return
-		if value.startswith(" ") and (not self.text or self.text[-1] in (3, 32)):
+		if value.startswith(" ") and (
+			not self._standard_paragraph_open or self.text[-1] in (3, 32)
+		):
 			value = value.lstrip(" ")
 		self._append_ascii(value)
 
@@ -293,7 +333,10 @@ class _DoxBuilder:
 			- self._reserved_text_bytes - len(_TEXT_TRAILER)
 		)
 		if remaining > 0:
-			self.text.extend(data[:remaining])
+			data = data[:remaining]
+			self.text.extend(data)
+			if data:
+				self._standard_paragraph_open = True
 
 	def line_break(self):
 		if self.text.endswith(b"\x08\x03"):
@@ -639,6 +682,176 @@ class _DoxBuilder:
 			raise DoxError("Reserved form marker no longer fits the TEXT chunk")
 		return True
 
+	@staticmethod
+	def _unit_table_span(cell, attribute):
+		value = cell.get(attribute)
+		return value is None or str(value).strip() == "1"
+
+	def _simple_table_rows(self, table):
+		if table.find("table") is not None:
+			return None
+
+		rows = []
+
+		def add_row(row):
+			cells = []
+			for child in row.children:
+				if isinstance(child, (Comment, Doctype)):
+					continue
+				if isinstance(child, NavigableString):
+					if str(child).strip():
+						return False
+					continue
+				if not isinstance(child, Tag) or child.name.lower() not in ("td", "th"):
+					return False
+				if not self._unit_table_span(child, "colspan"):
+					return False
+				if not self._unit_table_span(child, "rowspan"):
+					return False
+				if any(
+					descendant.name.lower() not in _TABLE_INLINE_TAGS
+					for descendant in child.find_all(True)
+				):
+					return False
+				cells.append(child)
+			if not cells:
+				return False
+			rows.append(cells)
+			return True
+
+		def add_section(section):
+			for child in section.children:
+				if isinstance(child, (Comment, Doctype)):
+					continue
+				if isinstance(child, NavigableString):
+					if str(child).strip():
+						return False
+					continue
+				if not isinstance(child, Tag) or child.name.lower() != "tr":
+					return False
+				if not add_row(child):
+					return False
+			return True
+
+		for child in table.children:
+			if isinstance(child, (Comment, Doctype)):
+				continue
+			if isinstance(child, NavigableString):
+				if str(child).strip():
+					return None
+				continue
+			if not isinstance(child, Tag):
+				return None
+			name = child.name.lower()
+			if name == "tr":
+				if not add_row(child):
+					return None
+			elif name in ("thead", "tbody", "tfoot"):
+				if not add_section(child):
+					return None
+			else:
+				return None
+
+		if not rows or len(rows) > self.limits.max_table_rows:
+			return None
+		column_count = len(rows[0])
+		if not 2 <= column_count <= self.limits.max_table_columns:
+			return None
+		if any(len(row) != column_count for row in rows):
+			return None
+		if len(rows) * column_count > self.limits.max_table_cells:
+			return None
+		return rows
+
+	def _table_inline_budget(self, node):
+		if isinstance(node, (Comment, Doctype)):
+			return 0
+		if isinstance(node, NavigableString):
+			return len(_ascii(re.sub(r"\s+", " ", str(node))))
+		if not isinstance(node, Tag):
+			return 0
+		name = node.name.lower()
+		if name == "br":
+			return 2
+		budget = sum(self._table_inline_budget(child) for child in node.children)
+		if name == "a":
+			budget += 8
+		if name in ("b", "strong", "em", "i", "cite"):
+			budget += 6
+		return budget
+
+	def _table_budget(self, rows):
+		budget = len(_TEXT_FORMAT_RESET) + 2 if self._standard_paragraph_open else 0
+		for row in rows:
+			budget += 3
+			for cell in row:
+				budget += _TABLE_COLUMN_HEADER_BYTES + 1
+				budget += self._table_inline_budget(cell)
+				if cell.name.lower() == "th":
+					budget += 6
+		return budget
+
+	def _render_table_cell(self, cell):
+		text = self.text
+		paragraph_open = self._standard_paragraph_open
+		self.text = bytearray()
+		self._standard_paragraph_open = False
+		try:
+			if cell.name.lower() == "th":
+				self._append_control(b"\x02\x03\x01")
+			self._render_children(cell)
+			if cell.name.lower() == "th":
+				self._append_control(b"\x02\x01\x01")
+			return bytes(self.text)
+		finally:
+			self.text = text
+			self._standard_paragraph_open = paragraph_open
+
+	def _render_table(self, table):
+		rows = self._simple_table_rows(table)
+		if rows is None:
+			return False
+		column_count = len(rows[0])
+		if (
+			self._table_rows + len(rows) > self.limits.max_table_rows
+			or self._table_cells + len(rows) * column_count > self.limits.max_table_cells
+		):
+			return False
+		budget = self._table_budget(rows)
+		if (
+			len(self.text) + self._reserved_text_bytes + budget + len(_TEXT_TRAILER)
+			> self.limits.max_text_bytes
+		):
+			return False
+
+		encoded_rows = []
+		for cells in rows:
+			row = bytearray((0xff, 0x10 | column_count))
+			for column, cell in enumerate(cells):
+				start = len(row)
+				row.extend(_table_column_header(column, column_count))
+				row.extend(self._render_table_cell(cell))
+				row.append(0)
+				delta = len(row) - start
+				if not _TABLE_COLUMN_HEADER_BYTES + 1 <= delta <= 0xffff:
+					raise DoxError("DOX table cell offset exceeds its 16-bit field")
+				struct.pack_into("<H", row, start + 1, delta)
+			row.append(0)
+			encoded_rows.append(bytes(row))
+
+		prefix = (
+			_TEXT_FORMAT_RESET + b"\x00\x00"
+			if self._standard_paragraph_open else b""
+		)
+		encoded = prefix + b"".join(encoded_rows)
+		if len(encoded) > budget:
+			raise DoxError("DOX table exceeded its preflight text budget")
+		self.text.extend(encoded)
+		self._standard_paragraph_open = False
+		self._table_rows += len(rows)
+		self._table_cells += len(rows) * column_count
+		return True
+
 	def render_html(self, document):
 		if isinstance(document, bytes):
 			document = document.decode("utf-8", errors="replace")
@@ -669,6 +882,17 @@ class _DoxBuilder:
 			return
 		name = node.name.lower()
 		if name in _REMOVED_TAGS:
+			return
+		if name == "table":
+			if not self._table_fallback_depth and self._render_table(node):
+				return
+			self.line_break()
+			self._table_fallback_depth += 1
+			try:
+				self._render_children(node, preserve=preserve, link_id=link_id)
+			finally:
+				self._table_fallback_depth -= 1
+			self.line_break()
 			return
 		if name in ("input", "button", "textarea", "select"):
 			self._append_form_marker(node)
@@ -900,21 +1124,107 @@ def _split_ctrl_strings(payload):
 	raise DoxValidationError("CTRL string section is missing its terminator")
 
 
-def _control_marker_ids(text):
-	control_ids = []
-	offset = 0
-	while True:
-		offset = text.find(b"\x0a\x07", offset)
-		if offset < 0:
-			return control_ids
-		end = offset + 8
-		if end > len(text) or text[offset + 3:end] != _FORM_MARKER_SUFFIX:
-			raise DoxValidationError("Malformed CTRL marker in TEXT")
-		control_ids.append(text[offset + 2])
+def _scan_text_body(text, start, terminator=None):
+	"""Scan one standard or column body without mistaking control data for NUL."""
+	marker_ids = []
+	offset = start
+	limit = len(text) if terminator is None else terminator + 1
+	while offset < limit:
+		value = text[offset]
+		if value == 0:
+			if terminator is not None and offset != terminator:
+				raise DoxValidationError("DOX table cell terminates before its column jump")
+			return offset, marker_ids
+		if value >= 12:
+			offset += 1
+			continue
+		if value == 1:
+			length = 2
+		elif value == 2:
+			length = 3
+		elif value in (3, 4, 6, 7):
+			length = 1
+		elif value == 5:
+			length = 2
+		elif 8 <= value <= 11:
+			length = 2 * (value - 7)
+		else:
+			raise DoxValidationError("Invalid control byte in DOX TEXT")
+		end = offset + length
+		if end > limit:
+			raise DoxValidationError("Truncated control code in DOX TEXT")
+		if value == 10 and text[offset + 1] == 7:
+			end = offset + 8
+			if end > limit or text[offset + 3:end] != _FORM_MARKER_SUFFIX:
+				raise DoxValidationError("Malformed CTRL marker in TEXT")
+			marker_ids.append(text[offset + 2])
 		offset = end
+	if terminator is not None:
+		raise DoxValidationError("DOX table column jump does not land after a cell terminator")
+	raise DoxValidationError("DOX paragraph is missing its text terminator")
 
 
-def _validate_ctrl(payload, links, text, limits):
+def _validate_text(text, limits):
+	marker_ids = []
+	offset = 0
+	table_rows = 0
+	table_cells = 0
+	while offset < len(text):
+		if text[offset] != 0xff:
+			terminator, found = _scan_text_body(text, offset)
+			marker_ids.extend(found)
+			follow = terminator + 1
+		else:
+			if offset + 2 > len(text):
+				raise DoxValidationError("Truncated DOX table paragraph header")
+			flags_count = text[offset + 1]
+			column_count = flags_count & 15
+			if (
+				flags_count != (0x10 | column_count)
+				or not 2 <= column_count <= limits.max_table_columns
+			):
+				raise DoxValidationError("Invalid DOX table column count or flags")
+			table_rows += 1
+			table_cells += column_count
+			if table_rows > limits.max_table_rows or table_cells > limits.max_table_cells:
+				raise DoxValidationError("DOX table exceeds its configured row or cell limit")
+			column = offset + 2
+			for number in range(column_count):
+				if column + _TABLE_COLUMN_HEADER_BYTES > len(text):
+					raise DoxValidationError("Truncated DOX table column header")
+				header = text[column:column + _TABLE_COLUMN_HEADER_BYTES]
+				if header[0] != _TABLE_COLUMN_HEADER_BYTES:
+					raise DoxValidationError("Invalid DOX table column header length")
+				expected = _table_column_header(number, column_count)
+				if header[3:] != expected[3:]:
+					raise DoxValidationError("Non-canonical DOX table geometry or frame style")
+				delta = struct.unpack_from("<H", header, 1)[0]
+				if delta < _TABLE_COLUMN_HEADER_BYTES + 1:
+					raise DoxValidationError("DOX table column jump points inside its header")
+				target = column + delta
+				if target >= len(text):
+					raise DoxValidationError("DOX table column jump extends past TEXT")
+				terminator = target - 1
+				_, found = _scan_text_body(
+					text, column + _TABLE_COLUMN_HEADER_BYTES, terminator
+				)
+				marker_ids.extend(found)
+				column = target
+				if number + 1 < column_count and text[column] != _TABLE_COLUMN_HEADER_BYTES:
+					raise DoxValidationError("DOX table column jump misses the next header")
+			follow = column
+
+		if follow >= len(text) or text[follow] not in (0, 0xff):
+			raise DoxValidationError("Invalid DOX paragraph continuation marker")
+		if text[follow] == 0xff:
+			if follow + 1 != len(text):
+				raise DoxValidationError("DOX end marker must be final")
+			return marker_ids
+		offset = follow + 1
+	raise DoxValidationError("DOX TEXT is missing its final marker")
+
+
+def _validate_ctrl(payload, links, marker_ids, limits):
 	if len(payload) > limits.max_control_bytes:
 		raise DoxValidationError("CTRL working allocation exceeds its configured size limit")
 	if len(payload) < 4:
@@ -989,7 +1299,6 @@ def _validate_ctrl(payload, links, text, limits):
 	if normal_string_ids & mutable_string_ids:
 		raise DoxValidationError("Mutable CTRL value buffers cannot be reused")
 
-	marker_ids = _control_marker_ids(text)
 	if marker_ids != list(range(1, len(controls) + 1)):
 		raise DoxValidationError("TEXT CTRL markers do not match the CTRL records")
 
@@ -1005,6 +1314,7 @@ def validate_dox(document, *, limits=None):
 	text = chunks[b"TEXT"]
 	if len(text) > limits.max_text_bytes or not text.endswith(b"\x00\xff"):
 		raise DoxValidationError("Invalid or oversized TEXT chunk")
+	marker_ids = _validate_text(text, limits)
 
 	graphics = _split_counted_records(
 		chunks[b"GRPH"], maximum=limits.max_graphics, label="graphic"
@@ -1039,7 +1349,7 @@ def validate_dox(document, *, limits=None):
 		):
 			raise DoxValidationError("Invalid LINK record")
 	if b"CTRL" in chunks:
-		_validate_ctrl(chunks[b"CTRL"], links, text, limits)
-	elif _control_marker_ids(text):
+		_validate_ctrl(chunks[b"CTRL"], links, marker_ids, limits)
+	elif marker_ids:
 		raise DoxValidationError("TEXT contains CTRL markers without a CTRL chunk")
 	return chunks
