@@ -47,8 +47,12 @@ SymZilla renders simple rectangular tables with two to four columns as framed
 DOX grids.  Cells may contain text, inline links, and remote images.  Table
 images are resized to a conservative per-column width so they remain inside
 their cells at the document's minimum render width; linked images remain
-directly clickable.  Wider, nested, spanned, ragged, or block-content tables
-fall back atomically to cell content in reading order.
+directly clickable.  A centered image-only HTML table with consistent, bounded
+numeric table, cell, and image dimensions instead retains fitted fixed-width
+geometry.  GB-proxy centers the grid and its images, and raises that document's
+minimum width to prevent overlap.  Percentage, CSS, mixed, inconsistent, or
+unsafe layouts retain responsive sizing.  Wider, nested, spanned, ragged, or
+block-content tables fall back atomically to cell content in reading order.
 .SH REMOTE MARKDOWN
 GB-proxy renders remote Markdown for both client families.  GEOBENCH receives
 simplified HTML, while SymZilla receives a bounded DOX representation.  A

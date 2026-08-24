@@ -117,10 +117,14 @@ The supported safe subset includes headings, paragraphs, ordered and unordered
 lists, emphasis, code spans and blocks, tables, links, and remote images.
 GEOBENCH retains simple table markup. SymZilla renders rectangular tables with
 two to four columns and text, inline links, or remote images as framed DOX
-grids. Images are resized to the conservative per-column width and linked
-images remain directly clickable; a failed image keeps bounded alt text in the
-cell. Tables containing block content, or wider, nested, spanned, or ragged
-tables, fall back atomically to cell content in reading order.
+grids. Centered image-only HTML tables with consistent, bounded numeric table,
+cell, and image dimensions retain a fitted fixed width: the grid is centered in
+wider windows, its images retain the declared safe size, and the document
+minimum width prevents overlap in narrower windows. Other table images use the
+conservative responsive per-column width. Linked images remain directly
+clickable, and a failed image keeps bounded alt text in the cell. Tables
+containing block content, or wider, nested, spanned, or ragged tables, fall
+back atomically to cell content in reading order.
 Relative link and image destinations are resolved against the final remote
 document URL after redirects. Remote HTTP or HTTPS images then pass through the
 same download, size, conversion, and colour limits as images in HTML pages.
@@ -172,7 +176,13 @@ table's column count and the DOX minimum render width. This prevents an image
 from overflowing its cell when the SymZilla window is narrowed. The same image
 URL may therefore produce separate page-sized and cell-sized SGX records while
 a bounded per-document source cache avoids duplicate downloads under the
-default limits.
+default limits. As a narrow compatibility exception for classic image grids,
+an HTML table centered with legacy markup may retain consistent pixel-only
+`width`, centered-cell, and image dimension attributes. GB-proxy freezes that
+bounded geometry, centers both the table and each image, and raises only that
+document's minimum width to the fitted table width. Percentages, CSS sizes,
+mixed-content cells, inconsistent dimensions, and unsafe values keep the
+responsive layout.
 
 Bounded GET forms support one-line text/search fields and submit buttons.
 Hidden values and checked radio/checkbox defaults are retained in the short

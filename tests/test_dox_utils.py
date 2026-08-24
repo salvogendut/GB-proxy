@@ -334,6 +334,265 @@ class DoxSerializationTests(unittest.TestCase):
 					_width_bytes, width, height = struct.unpack_from("<HHH", graphic, 2)
 					self.assertEqual((width, height), expected_size)
 
+	def test_retrocheats_legacy_widths_fit_and_center_full_sized_images(self):
+		images = [
+			_png(tuple(
+				1 if pixel % 120 < (identity + 1) * 20 else 0
+				for pixel in range(120 * 80)
+			), 120, 80)
+			for identity in range(6)
+		]
+		html = (
+			"<center><table border='0' cellpadding='2' cellspacing='0' width='384'>"
+			+ "".join(
+				"<tr>" + "".join(
+					f"<td width='128' align='center'><a href='/{row}-{column}'>"
+					f"<img src='/{row}-{column}.png' width='120' height='80' "
+					f"border='0' alt='{row}-{column}'></a></td>"
+					for column in range(3)
+				) + "</tr>"
+				for row in range(2)
+			)
+			+ "</table></center>"
+		)
+		expected_geometry = (
+			bytes.fromhex("85 fd 02 02 ff 01 01 01"),
+			bytes.fromhex("83 ff 02 02 ff 01 01 01"),
+			bytes.fromhex("81 01 02 02 ff 01 01 01"),
+		)
+
+		for profile in (
+			SgxProfile(SGX_MODE_0, 4),
+			SgxProfile(SGX_MODE_5, 16),
+		):
+			with self.subTest(profile=profile):
+				requests = []
+
+				def fetch(url):
+					requests.append(url)
+					return images[len(requests) - 1]
+
+				document = build_dox_from_html(
+					html,
+					"http://retrocheats.neocities.org/",
+					profile=profile,
+					image_fetcher=fetch,
+					dithering="none",
+				)
+				chunks = validate_dox(document)
+				graphics = _counted_records(chunks[b"GRPH"])
+
+				self.assertEqual(struct.unpack("<HHBB", chunks[b"HEAD"]), (384, 600, 0, 2))
+				self.assertEqual(len(requests), 6)
+				self.assertEqual(len(graphics), 7)
+				self.assertEqual(chunks[b"LINK"][0], 6)
+				self.assertEqual(chunks[b"TEXT"].count(b"\x09\x01\x03\x01"), 6)
+				for graphic in graphics[1:]:
+					self.assertEqual(struct.unpack_from("<HHH", graphic, 2)[1:], (120, 80))
+
+				offset = 0
+				for _row in range(2):
+					self.assertEqual(chunks[b"TEXT"][offset:offset + 2], b"\xff\x13")
+					offset += 2
+					for column in range(3):
+						header = chunks[b"TEXT"][offset:offset + 14]
+						self.assertEqual(header[3:11], expected_geometry[column])
+						delta = struct.unpack_from("<H", header, 1)[0]
+						body = chunks[b"TEXT"][offset + 14:offset + delta - 1]
+						self.assertTrue(body.startswith(b"\x09\x01\x03\x01"))
+						offset += delta
+					self.assertEqual(chunks[b"TEXT"][offset], 0)
+					offset += 1
+
+	def test_fitted_image_tables_cover_two_to_four_columns_on_both_profiles(self):
+		image = _png((0, 1) * (120 * 80 // 2), 120, 80)
+		for columns in (2, 3, 4):
+			for profile in (
+				SgxProfile(SGX_MODE_0, 4),
+				SgxProfile(SGX_MODE_5, 16),
+			):
+				with self.subTest(columns=columns, profile=profile):
+					table_width = columns * 128
+					html = (
+						f"<center><table width='{table_width}'><tr>"
+						+ "".join(
+							("<td width='128' align='center'>"
+							 "<img src='/same.png' width='120' height='80'></td>")
+							for _ in range(columns)
+						)
+						+ "</tr></table></center>"
+					)
+					document = build_dox_from_html(
+						html,
+						"https://example.com/",
+						profile=profile,
+						image_fetcher=lambda _url: image,
+						dithering="none",
+					)
+					chunks = validate_dox(document)
+					graphic, = _counted_records(chunks[b"GRPH"])
+
+					self.assertEqual(
+						struct.unpack("<HHBB", chunks[b"HEAD"]),
+						(table_width, 600, 0, 2),
+					)
+					self.assertEqual(
+						chunks[b"TEXT"].count(b"\x09\x01\x03\x01"),
+						columns,
+					)
+					self.assertEqual(
+						struct.unpack_from("<HHH", graphic, 2)[1:],
+						(120, 80),
+					)
+
+	def test_odd_heterogeneous_fitted_widths_remain_centered(self):
+		image = _png((0, 1) * (120 * 80 // 2), 120, 80)
+		document = build_dox_from_html(
+			("<center><table width='257'><tr>"
+			 "<td width='128' align='center'><img src='/same.png' width='120' height='80'></td>"
+			 "<td width='129' align='center'><img src='/same.png' width='120' height='80'></td>"
+			 "</tr></table></center>"),
+			"https://example.com/",
+			image_fetcher=lambda _url: image,
+			dithering="none",
+		)
+		chunks = validate_dox(document)
+
+		self.assertEqual(struct.unpack("<HHBB", chunks[b"HEAD"]), (257, 600, 0, 2))
+		self.assertEqual(chunks[b"TEXT"].count(b"\x09\x01\x03\x01"), 2)
+
+	def test_fitted_cells_ignore_formatting_whitespace_around_linked_images(self):
+		image = _png((0, 1) * (120 * 80 // 2), 120, 80)
+		compact = (
+			"<center><table width='256'><tr>"
+			"<td width='128' align='center'><center><a href='/one'>"
+			"<img src='/same.png' width='120' height='80'></a></center></td>"
+			"<td width='128' align='center'><center><a href='/two'>"
+			"<img src='/same.png' width='120' height='80'></a></center></td>"
+			"</tr></table></center>"
+		)
+		formatted = (
+			"<center><table width='256'><tr>"
+			"<td width='128' align='center'>\n  <center>\n    <a href='/one'>\n"
+			"      <img src='/same.png' width='120' height='80'>\n"
+			"    </a>\n  </center>\n</td>"
+			"<td width='128' align='center'>\n  <center>\n    <a href='/two'>\n"
+			"      <img src='/same.png' width='120' height='80'>\n"
+			"    </a>\n  </center>\n</td>"
+			"</tr></table></center>"
+		)
+
+		def build(html):
+			return build_dox_from_html(
+				html,
+				"https://example.com/",
+				image_fetcher=lambda _url: image,
+				dithering="none",
+			)
+
+		self.assertEqual(build(formatted), build(compact))
+
+	def test_unsafe_or_ambiguous_legacy_widths_keep_responsive_geometry(self):
+		image = _png((0, 1) * (120 * 80 // 2), 120, 80)
+
+		def cell(*, width="128", align="center", image_width="120", extra=""):
+			return (
+				f"<td width='{width}' align='{align}'><img src='/same.png' "
+				f"width='{image_width}' height='80'>{extra}</td>"
+			)
+
+		def table(cells, *, width="384", style=""):
+			style_attribute = f" style='{style}'" if style else ""
+			return (
+				f"<center><table width='{width}'{style_attribute}><tr>"
+				+ "".join(cells)
+				+ "</tr></table></center>"
+			)
+
+		base_cells = [cell(), cell(), cell()]
+		cases = (
+			table(base_cells, width="384px"),
+			table(base_cells, width="9" * 5000),
+			table(base_cells, width="383"),
+			table([cell(width="127"), cell(), cell()]),
+			table([cell(align="left"), cell(), cell()]),
+			table(base_cells, style="width:384px"),
+			table(base_cells).replace("<tr>", "<tr style='height:80px'>"),
+			table(base_cells).replace(
+				"<tr>", "<tbody style='width:384px'><tr>"
+			).replace("</tr>", "</tr></tbody>"),
+			table([cell(image_width="124"), cell(), cell()]),
+			table([cell(extra=" Caption"), cell(), cell()]),
+		)
+		canonical_first_geometry = bytes.fromhex("05 01 01 03 ff ff 02 03")
+		for html in cases:
+			with self.subTest(html=html):
+				document = build_dox_from_html(
+					html,
+					"https://example.com/",
+					image_fetcher=lambda _url: image,
+					dithering="none",
+				)
+				chunks = validate_dox(document)
+
+				self.assertEqual(struct.unpack("<HHBB", chunks[b"HEAD"]), (200, 600, 0, 2))
+				self.assertEqual(chunks[b"TEXT"][:2], b"\xff\x13")
+				self.assertEqual(chunks[b"TEXT"][5:13], canonical_first_geometry)
+				self.assertNotIn(b"\x09\x01\x03\x01", chunks[b"TEXT"])
+
+	def test_failed_fitted_images_keep_centered_bounded_alt_cells(self):
+		html = (
+			"<center><table width='256'><tr>"
+			"<td width='128' align='center'><img src='/one.png' width='120' "
+			"height='80' alt='One unavailable'></td>"
+			"<td width='128' align='center'><img src='/two.png' width='120' "
+			"height='80' alt='Two unavailable'></td>"
+			"</tr></table></center>"
+		)
+		document = build_dox_from_html(
+			html,
+			"https://example.com/",
+			image_fetcher=lambda _url: b"not an image",
+		)
+		chunks = validate_dox(document)
+
+		self.assertEqual(struct.unpack("<HHBB", chunks[b"HEAD"]), (256, 600, 0, 2))
+		self.assertEqual(chunks[b"TEXT"].count(b"\x09\x01\x03\x01"), 2)
+		self.assertIn(b"[One unavailable]", chunks[b"TEXT"])
+		self.assertIn(b"[Two unavailable]", chunks[b"TEXT"])
+		self.assertEqual(chunks[b"GRPH"][0], 0)
+
+	def test_fitted_table_text_preflight_does_not_leak_document_width(self):
+		image = _png((0, 1) * (120 * 80 // 2), 120, 80)
+		html = (
+			"<center><table width='256'><tr>"
+			"<td width='128' align='center'><img src='/same.png' width='120' height='80'></td>"
+			"<td width='128' align='center'><img src='/same.png' width='120' height='80'></td>"
+			"</tr></table></center>"
+		)
+		fitted = build_dox_from_html(
+			html,
+			"https://example.com/",
+			image_fetcher=lambda _url: image,
+			dithering="none",
+		)
+		fitted_text_size = len(validate_dox(fitted)[b"TEXT"])
+		fallback = build_dox_from_html(
+			html,
+			"https://example.com/",
+			limits=DoxLimits(max_text_bytes=fitted_text_size - 1),
+			image_fetcher=lambda _url: image,
+			dithering="none",
+		)
+		chunks = validate_dox(
+			fallback,
+			limits=DoxLimits(max_text_bytes=fitted_text_size - 1),
+		)
+
+		self.assertEqual(struct.unpack("<HHBB", chunks[b"HEAD"]), (200, 600, 0, 2))
+		self.assertNotIn(b"\xff\x12", chunks[b"TEXT"])
+		self.assertNotIn(b"\x09\x01\x03\x01", chunks[b"TEXT"])
+
 	def test_page_and_table_image_variants_share_one_source_fetch(self):
 		image = _png((0, 1) * (160 * 80 // 2), 160, 80)
 		page = "<img src='/same.png'>"
@@ -969,6 +1228,38 @@ class DoxSerializationTests(unittest.TestCase):
 				DoxValidationError, message
 			):
 				validate_dox(_replace_chunk(document, b"TEXT", bytes(mutated)))
+
+	def test_validator_rejects_unsafe_fitted_geometry_and_head_bounds(self):
+		image = _png((0, 1) * (120 * 80 // 2), 120, 80)
+		document = build_dox_from_html(
+			("<center><table width='256'><tr>"
+			 "<td width='128' align='center'><img src='/same.png' width='120' height='80'></td>"
+			 "<td width='128' align='center'><img src='/same.png' width='120' height='80'></td>"
+			 "</tr></table></center>"),
+			"https://example.com/",
+			image_fetcher=lambda _url: image,
+			dithering="none",
+		)
+		chunks = validate_dox(document)
+
+		with self.assertRaisesRegex(DoxValidationError, "outside the document"):
+			validate_dox(_replace_chunk(
+				document, b"HEAD", struct.pack("<HHBB", 200, 600, 0, 2)
+			))
+		with self.assertRaisesRegex(DoxValidationError, "HEAD"):
+			validate_dox(_replace_chunk(
+				document, b"HEAD", struct.pack("<HHBB", 601, 600, 0, 2)
+			))
+
+		unmarked = bytearray(chunks[b"TEXT"])
+		unmarked[5] &= 0xfe
+		with self.assertRaisesRegex(DoxValidationError, "marked DOX column"):
+			validate_dox(_replace_chunk(document, b"TEXT", bytes(unmarked)))
+
+		overlap = bytearray(chunks[b"TEXT"])
+		overlap[9:11] = b"\x91\x03"  # marked signed-14 representation of 200
+		with self.assertRaisesRegex(DoxValidationError, "not contiguous"):
+			validate_dox(_replace_chunk(document, b"TEXT", bytes(overlap)))
 
 	def test_table_limits_reject_unsafe_native_column_counts(self):
 		for columns in (1, 16):

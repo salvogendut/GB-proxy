@@ -58,12 +58,13 @@ _REMOVED_TAGS = frozenset((
 ))
 _TABLE_INLINE_TAGS = frozenset((
 	"a", "abbr", "b", "bdi", "bdo", "br", "cite", "code", "data", "del",
-	"dfn", "em", "i", "img", "ins", "kbd", "mark", "q", "s", "samp", "small",
+	"center", "dfn", "em", "i", "img", "ins", "kbd", "mark", "q", "s", "samp", "small",
 	"span", "strong", "sub", "sup", "time", "u", "var", "wbr",
 ))
 _TABLE_COLUMN_HEADER_BYTES = 14
 _TABLE_CELL_STYLE = b"\x33\x23\x13"
 _TABLE_CELL_HORIZONTAL_OVERHEAD = 5
+_TABLE_CENTER_FORMAT = b"\x09\x01\x03\x01"
 
 
 class DoxError(ValueError):
@@ -167,6 +168,15 @@ class DoxLimits:
 			raise ValueError("SymZilla accepts DOX documents up to 96 KiB")
 
 
+@dataclass(frozen=True)
+class _FittedTableLayout:
+	"""A bounded legacy pixel table which SymZilla can center at any width."""
+
+	table_width: int
+	cell_widths: tuple
+	image_bounds: tuple
+
+
 def _chunk(name, payload):
 	if name not in _CHUNK_NAMES:
 		raise ValueError(f"Unsupported DOX chunk {name!r}")
@@ -184,6 +194,13 @@ def _dox_fixed(value):
 	))
 
 
+def _decode_dox_fixed(data):
+	if len(data) != 2 or not data[0] & 1 or not data[1] & 1:
+		raise DoxValidationError("Invalid marked DOX column constant")
+	value = (data[0] >> 1) | ((data[1] >> 1) << 7)
+	return value - 0x4000 if value & 0x2000 else value
+
+
 def _table_column_header(column, count):
 	return (
 		bytes((_TABLE_COLUMN_HEADER_BYTES, 0, 0))
@@ -191,6 +208,53 @@ def _table_column_header(column, count):
 		+ _dox_fixed(-1) + bytes((2, count))
 		+ _TABLE_CELL_STYLE
 	)
+
+
+def _fitted_table_column_header(column, cell_widths):
+	column_sizes = tuple(width - 1 for width in cell_widths)
+	position = -(sum(column_sizes) // 2) + sum(column_sizes[:column])
+	return (
+		bytes((_TABLE_COLUMN_HEADER_BYTES, 0, 0))
+		+ _dox_fixed(position) + b"\x02\x02"
+		+ _dox_fixed(cell_widths[column] - 1) + b"\x01\x01"
+		+ _TABLE_CELL_STYLE
+	)
+
+
+def _validate_table_geometry(headers, column_count, minimum_width, maximum_width):
+	canonical = all(
+		header[3:] == _table_column_header(column, column_count)[3:]
+		for column, header in enumerate(headers)
+	)
+	if canonical:
+		return
+	if column_count > 4:
+		raise DoxValidationError("Fitted DOX tables support at most four columns")
+	if any(
+		header[5:7] != b"\x02\x02"
+		or header[9:11] != b"\x01\x01"
+		or header[11:] != _TABLE_CELL_STYLE
+		for header in headers
+	):
+		raise DoxValidationError("Non-canonical DOX table geometry or frame style")
+
+	positions = [_decode_dox_fixed(header[3:5]) for header in headers]
+	sizes = [_decode_dox_fixed(header[7:9]) for header in headers]
+	if any(size < _TABLE_CELL_HORIZONTAL_OVERHEAD for size in sizes):
+		raise DoxValidationError("Fitted DOX table column is too narrow")
+	for width in (minimum_width, maximum_width):
+		evaluated = [constant + width // 2 for constant in positions]
+		if evaluated[0] < 0 or evaluated[-1] + sizes[-1] > width:
+			raise DoxValidationError("Fitted DOX table extends outside the document")
+		if any(
+			evaluated[column] + sizes[column] != evaluated[column + 1]
+			for column in range(column_count - 1)
+		):
+			raise DoxValidationError("Fitted DOX table columns are not contiguous")
+		left_margin = evaluated[0]
+		right_margin = width - evaluated[-1] - sizes[-1]
+		if abs(left_margin - right_margin) > 1:
+			raise DoxValidationError("Fitted DOX table is not centered")
 
 
 def _ascii(value, *, limit=None):
@@ -306,6 +370,8 @@ class _DoxBuilder:
 		self._table_rows = 0
 		self._table_cells = 0
 		self._table_image_width = None
+		self._table_image_height = None
+		self._document_min_width = DOX_MIN_DOCUMENT_WIDTH
 
 	def _append_control(self, data):
 		if (
@@ -431,7 +497,10 @@ class _DoxBuilder:
 
 	def _image_fallback(self, alt):
 		if alt:
-			limit = DOX_MAX_TABLE_IMAGE_ALT_BYTES if self._table_image_width else None
+			limit = (
+				DOX_MAX_TABLE_IMAGE_ALT_BYTES
+				if self._table_image_width is not None else None
+			)
 			alt = _ascii(alt, limit=limit).decode("ascii")
 			if alt:
 				self.append_text(f"[{alt}]")
@@ -449,7 +518,10 @@ class _DoxBuilder:
 			self.limits.max_image_width,
 			self._table_image_width or self.limits.max_image_width,
 		)
-		max_height = self.limits.max_image_height
+		max_height = min(
+			self.limits.max_image_height,
+			self._table_image_height or self.limits.max_image_height,
+		)
 		source_key = None
 		if content is None:
 			if str(source).startswith("data:"):
@@ -729,6 +801,110 @@ class _DoxBuilder:
 		value = cell.get(attribute)
 		return value is None or str(value).strip() == "1"
 
+	@staticmethod
+	def _legacy_pixel_dimension(node, attribute, maximum):
+		value = node.get(attribute)
+		if value is None:
+			return None
+		value = str(value).strip()
+		if len(value) > 4 or re.fullmatch(r"[0-9]+", value) is None:
+			return None
+		value = int(value)
+		return value if 1 <= value <= maximum else None
+
+	@staticmethod
+	def _legacy_centered(node):
+		if node.has_attr("align"):
+			return str(node.get("align", "")).strip().lower() == "center"
+		return node.find_parent("center") is not None
+
+	@staticmethod
+	def _legacy_cell_centered(cell, image):
+		if cell.has_attr("align"):
+			return str(cell.get("align", "")).strip().lower() == "center"
+		parent = image.parent
+		while parent is not None and parent is not cell:
+			if isinstance(parent, Tag) and parent.name.lower() == "center":
+				return True
+			parent = parent.parent
+		return False
+
+	@staticmethod
+	def _image_only_cell(cell):
+		images = cell.find_all("img")
+		if len(images) != 1:
+			return None
+		for descendant in cell.descendants:
+			if isinstance(descendant, (Comment, Doctype)):
+				continue
+			if isinstance(descendant, NavigableString):
+				if str(descendant).strip():
+					return None
+				continue
+			if (
+				not isinstance(descendant, Tag)
+				or descendant.name.lower() not in ("a", "center", "img")
+			):
+				return None
+		return images[0]
+
+	def _fitted_table_layout(self, table, rows):
+		"""Return strict legacy-pixel geometry for a centered image-only grid."""
+		if (
+			len(rows[0]) > 4
+			or table.has_attr("style")
+			or table.find(style=True) is not None
+		):
+			return None
+		table_width = self._legacy_pixel_dimension(
+			table, "width", DOX_MAX_DOCUMENT_WIDTH
+		)
+		if table_width is None or not self._legacy_centered(table):
+			return None
+
+		cell_widths = tuple(
+			self._legacy_pixel_dimension(cell, "width", DOX_MAX_DOCUMENT_WIDTH)
+			for cell in rows[0]
+		)
+		if None in cell_widths or sum(cell_widths) != table_width:
+			return None
+		for row in rows[1:]:
+			if tuple(
+				self._legacy_pixel_dimension(cell, "width", DOX_MAX_DOCUMENT_WIDTH)
+				for cell in row
+			) != cell_widths:
+				return None
+
+		image_bounds = []
+		for row in rows:
+			bounds = []
+			for column, cell in enumerate(row):
+				image = self._image_only_cell(cell)
+				if (
+					image is None or not self._legacy_cell_centered(cell, image)
+					or cell.has_attr("style")
+					or any(tag.has_attr("style") for tag in cell.find_all(True))
+				):
+					return None
+				width = self._legacy_pixel_dimension(
+					image, "width", self.limits.max_image_width
+				)
+				height = self._legacy_pixel_dimension(
+					image, "height", self.limits.max_image_height
+				)
+				if (
+					width is None or height is None or width < 8
+					or width > cell_widths[column] - _TABLE_CELL_HORIZONTAL_OVERHEAD
+				):
+					return None
+				bounds.append((width, height))
+			image_bounds.append(tuple(bounds))
+		return _FittedTableLayout(
+			table_width,
+			cell_widths,
+			tuple(image_bounds),
+		)
+
 	def _simple_table_rows(self, table):
 		if table.find("table") is not None:
 			return None
@@ -827,34 +1003,51 @@ class _DoxBuilder:
 			budget += 6
 		return budget
 
-	def _table_budget(self, rows):
+	def _table_budget(self, rows, layout):
 		budget = len(_TEXT_FORMAT_RESET) + 2 if self._standard_paragraph_open else 0
 		for row in rows:
 			budget += 3
 			for cell in row:
 				budget += _TABLE_COLUMN_HEADER_BYTES + 1
+				if layout is not None:
+					budget += len(_TABLE_CENTER_FORMAT)
 				budget += self._table_inline_budget(cell)
 				if cell.name.lower() == "th":
 					budget += 6
 		return budget
 
-	def _render_table_cell(self, cell, column_count):
+	def _render_table_cell(
+		self,
+		cell,
+		column_count,
+		*,
+		image_bounds=None,
+		center=False,
+	):
 		text = self.text
 		paragraph_open = self._standard_paragraph_open
 		table_image_width = self._table_image_width
+		table_image_height = self._table_image_height
 		self.text = bytearray()
 		self._standard_paragraph_open = False
-		# RENILN does not clip an oversized first inline object. Size against the
-		# document's minimum render width so the cell remains safe when SymZilla's
-		# window is narrowed. The canonical framed geometry consumes five pixels.
-		self._table_image_width = min(
-			self.limits.max_image_width,
-			DOX_MIN_DOCUMENT_WIDTH // column_count - _TABLE_CELL_HORIZONTAL_OVERHEAD,
-		)
+		if image_bounds is None:
+			# RENILN does not clip an oversized first inline object. Size responsive
+			# tables against the minimum render width so narrowing stays safe.
+			self._table_image_width = min(
+				self.limits.max_image_width,
+				DOX_MIN_DOCUMENT_WIDTH // column_count
+				- _TABLE_CELL_HORIZONTAL_OVERHEAD,
+			)
+			self._table_image_height = None
+		else:
+			self._table_image_width = image_bounds[0]
+			self._table_image_height = image_bounds[1]
 		try:
+			if center:
+				self._append_control(_TABLE_CENTER_FORMAT)
 			if cell.name.lower() == "th":
 				self._append_control(b"\x02\x03\x01")
-			self._render_children(cell)
+			self._render_children(cell, skip_blank=center)
 			if cell.name.lower() == "th":
 				self._append_control(b"\x02\x01\x01")
 			return bytes(self.text)
@@ -862,18 +1055,20 @@ class _DoxBuilder:
 			self.text = text
 			self._standard_paragraph_open = paragraph_open
 			self._table_image_width = table_image_width
+			self._table_image_height = table_image_height
 
 	def _render_table(self, table):
 		rows = self._simple_table_rows(table)
 		if rows is None:
 			return False
 		column_count = len(rows[0])
+		layout = self._fitted_table_layout(table, rows)
 		if (
 			self._table_rows + len(rows) > self.limits.max_table_rows
 			or self._table_cells + len(rows) * column_count > self.limits.max_table_cells
 		):
 			return False
-		budget = self._table_budget(rows)
+		budget = self._table_budget(rows, layout)
 		if (
 			len(self.text) + self._reserved_text_bytes + budget + len(_TEXT_TRAILER)
 			> self.limits.max_text_bytes
@@ -881,12 +1076,25 @@ class _DoxBuilder:
 			return False
 
 		encoded_rows = []
-		for cells in rows:
+		for row_number, cells in enumerate(rows):
 			row = bytearray((0xff, 0x10 | column_count))
 			for column, cell in enumerate(cells):
 				start = len(row)
-				row.extend(_table_column_header(column, column_count))
-				row.extend(self._render_table_cell(cell, column_count))
+				if layout is None:
+					row.extend(_table_column_header(column, column_count))
+				else:
+					row.extend(_fitted_table_column_header(
+						column, layout.cell_widths
+					))
+				row.extend(self._render_table_cell(
+					cell,
+					column_count,
+					image_bounds=(
+						None if layout is None
+						else layout.image_bounds[row_number][column]
+					),
+					center=layout is not None,
+				))
 				row.append(0)
 				delta = len(row) - start
 				if not _TABLE_COLUMN_HEADER_BYTES + 1 <= delta <= 0xffff:
@@ -906,6 +1114,10 @@ class _DoxBuilder:
 		self._standard_paragraph_open = False
 		self._table_rows += len(rows)
 		self._table_cells += len(rows) * column_count
+		if layout is not None:
+			self._document_min_width = max(
+				self._document_min_width, layout.table_width
+			)
 		return True
 
 	def render_html(self, document):
@@ -924,14 +1136,35 @@ class _DoxBuilder:
 		self._render_children(root)
 		return title or "SymZilla document"
 
-	def _render_children(self, node, *, preserve=False, link_id=None):
+	def _render_children(
+		self,
+		node,
+		*,
+		preserve=False,
+		link_id=None,
+		skip_blank=False,
+	):
 		for child in list(node.children):
-			self._render_node(child, preserve=preserve, link_id=link_id)
+			self._render_node(
+				child,
+				preserve=preserve,
+				link_id=link_id,
+				skip_blank=skip_blank,
+			)
 
-	def _render_node(self, node, *, preserve=False, link_id=None):
+	def _render_node(
+		self,
+		node,
+		*,
+		preserve=False,
+		link_id=None,
+		skip_blank=False,
+	):
 		if isinstance(node, (Comment, Doctype)):
 			return
 		if isinstance(node, NavigableString):
+			if skip_blank and not str(node).strip():
+				return
 			self.append_text(node, preserve=preserve)
 			return
 		if not isinstance(node, Tag):
@@ -945,7 +1178,12 @@ class _DoxBuilder:
 			self.line_break()
 			self._table_fallback_depth += 1
 			try:
-				self._render_children(node, preserve=preserve, link_id=link_id)
+				self._render_children(
+					node,
+					preserve=preserve,
+					link_id=link_id,
+					skip_blank=skip_blank,
+				)
 			finally:
 				self._table_fallback_depth -= 1
 			self.line_break()
@@ -972,7 +1210,12 @@ class _DoxBuilder:
 			# SymbOS 4.1 changed control 3 from a one-byte underline toggle
 			# into a two-byte formatting command.  The clickable link graphic
 			# is portable across releases, so keep the label as plain text.
-			self._render_link_children(node, link_id, preserve=preserve)
+			self._render_link_children(
+				node,
+				link_id,
+				preserve=preserve,
+				skip_blank=skip_blank,
+			)
 			if link_id is not None:
 				if self._linked_graphic_insertions == linked_before:
 					self.append_link_icon(link_id)
@@ -998,15 +1241,28 @@ class _DoxBuilder:
 			node,
 			preserve=preserve or name in ("pre", "xmp"),
 			link_id=link_id,
+			skip_blank=skip_blank,
 		)
 		if font is not None:
 			self._append_control(b"\x02\x01\x01")
 		if is_block:
 			self.line_break()
 
-	def _render_link_children(self, node, link_id, *, preserve=False):
+	def _render_link_children(
+		self,
+		node,
+		link_id,
+		*,
+		preserve=False,
+		skip_blank=False,
+	):
 		for child in list(node.children):
-			self._render_node(child, preserve=preserve, link_id=link_id)
+			self._render_node(
+				child,
+				preserve=preserve,
+				link_id=link_id,
+				skip_blank=skip_blank,
+			)
 
 	def serialize(self, title):
 		if self._reserved_text_bytes or self._control_ids:
@@ -1017,7 +1273,7 @@ class _DoxBuilder:
 		if not info.endswith(b"\x00"):
 			info = info[:-1] + b"\x00"
 		head = struct.pack(
-			"<HHBB", DOX_MIN_DOCUMENT_WIDTH, DOX_MAX_DOCUMENT_WIDTH, 0, 2
+			"<HHBB", self._document_min_width, DOX_MAX_DOCUMENT_WIDTH, 0, 2
 		)
 		graphics = bytes((len(self.graphics),))
 		graphics += b"".join(struct.pack("<H", len(item)) for item in self.graphics)
@@ -1220,7 +1476,7 @@ def _scan_text_body(text, start, terminator=None):
 	raise DoxValidationError("DOX paragraph is missing its text terminator")
 
 
-def _validate_text(text, limits):
+def _validate_text(text, limits, minimum_width, maximum_width):
 	marker_ids = []
 	offset = 0
 	table_rows = 0
@@ -1245,15 +1501,14 @@ def _validate_text(text, limits):
 			if table_rows > limits.max_table_rows or table_cells > limits.max_table_cells:
 				raise DoxValidationError("DOX table exceeds its configured row or cell limit")
 			column = offset + 2
+			headers = []
 			for number in range(column_count):
 				if column + _TABLE_COLUMN_HEADER_BYTES > len(text):
 					raise DoxValidationError("Truncated DOX table column header")
 				header = text[column:column + _TABLE_COLUMN_HEADER_BYTES]
 				if header[0] != _TABLE_COLUMN_HEADER_BYTES:
 					raise DoxValidationError("Invalid DOX table column header length")
-				expected = _table_column_header(number, column_count)
-				if header[3:] != expected[3:]:
-					raise DoxValidationError("Non-canonical DOX table geometry or frame style")
+				headers.append(header)
 				delta = struct.unpack_from("<H", header, 1)[0]
 				if delta < _TABLE_COLUMN_HEADER_BYTES + 1:
 					raise DoxValidationError("DOX table column jump points inside its header")
@@ -1268,6 +1523,9 @@ def _validate_text(text, limits):
 				column = target
 				if number + 1 < column_count and text[column] != _TABLE_COLUMN_HEADER_BYTES:
 					raise DoxValidationError("DOX table column jump misses the next header")
+			_validate_table_geometry(
+				headers, column_count, minimum_width, maximum_width
+			)
 			follow = column
 
 		if follow >= len(text) or text[follow] not in (0, 0xff):
@@ -1367,10 +1625,19 @@ def validate_dox(document, *, limits=None):
 		raise DoxValidationError("Invalid INFO chunk")
 	if len(chunks[b"HEAD"]) != 6:
 		raise DoxValidationError("HEAD must contain exactly six bytes")
+	minimum_width, maximum_width, reserved, version = struct.unpack(
+		"<HHBB", chunks[b"HEAD"]
+	)
+	if (
+		not DOX_MIN_DOCUMENT_WIDTH <= minimum_width <= maximum_width
+		or maximum_width != DOX_MAX_DOCUMENT_WIDTH
+		or reserved != 0 or version != 2
+	):
+		raise DoxValidationError("Invalid DOX document width or HEAD format")
 	text = chunks[b"TEXT"]
 	if len(text) > limits.max_text_bytes or not text.endswith(b"\x00\xff"):
 		raise DoxValidationError("Invalid or oversized TEXT chunk")
-	marker_ids = _validate_text(text, limits)
+	marker_ids = _validate_text(text, limits, minimum_width, maximum_width)
 
 	graphics = _split_counted_records(
 		chunks[b"GRPH"], maximum=limits.max_graphics, label="graphic"
