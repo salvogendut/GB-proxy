@@ -35,6 +35,17 @@ def _serialized_chunk(document, name):
 	return None
 
 
+def _counted_records(payload):
+	count = payload[0]
+	lengths = struct.unpack_from(f"<{count}H", payload, 1) if count else ()
+	offset = 1 + count * 2
+	records = []
+	for length in lengths:
+		records.append(payload[offset:offset + length])
+		offset += length
+	return records
+
+
 def _replace_chunk(document, name, payload):
 	result = bytearray()
 	offset = 0
@@ -237,7 +248,7 @@ class DoxSerializationTests(unittest.TestCase):
 				(b"Outer", b"Inner", b"Grid", b"End"),
 			),
 			(
-				("<table><tr><td><img src='/x.png' alt='Picture'></td>"
+				("<table><tr><td><div><img src='/x.png' alt='Picture'></div></td>"
 				 "<td>End</td></tr></table>"),
 				(b"Picture", b"End"),
 			),
@@ -250,21 +261,196 @@ class DoxSerializationTests(unittest.TestCase):
 				positions = [text.index(label) for label in labels]
 				self.assertEqual(positions, sorted(positions))
 
-	def test_image_table_fallback_keeps_the_existing_sgx_conversion(self):
+	def test_unsupported_image_table_fallback_keeps_page_sized_sgx(self):
 		requests = []
+		image = _png((0, 1) * (160 * 80 // 2), 160, 80)
 		document = build_dox_from_html(
-			("<table><tr><td><img src='/picture.png' alt='Picture'></td>"
+			("<table><tr><td colspan='2'><img src='/picture.png' alt='Picture'></td>"
 			 "<td>Caption</td></tr></table>"),
 			"http://example.com/",
-			image_fetcher=lambda url: requests.append(url) or _png((0, 1) * 4, 8),
+			image_fetcher=lambda url: requests.append(url) or image,
 		)
 		chunks = validate_dox(document)
+		graphics = _counted_records(chunks[b"GRPH"])
 
 		self.assertEqual(requests, ["http://example.com/picture.png"])
 		self.assertNotIn(b"\xff\x12", chunks[b"TEXT"])
-		self.assertEqual(chunks[b"GRPH"][0], 1)
+		self.assertEqual(len(graphics), 1)
+		self.assertEqual(struct.unpack_from("<HHH", graphics[0], 2)[1:], (160, 80))
 		self.assertIn(bytes((10, 2, 1, 0x80, 0, 1, 5, 1)), chunks[b"TEXT"])
 		self.assertIn(b"Caption", chunks[b"TEXT"])
+
+	def test_retrocheats_linked_image_grid_uses_cell_sized_sgx(self):
+		images = [
+			_png(tuple(
+				1 if pixel % 120 < (identity + 1) * 20 else 0
+				for pixel in range(120 * 80)
+			), 120, 80)
+			for identity in range(6)
+		]
+		html = "<table>" + "".join(
+			"<tr>" + "".join(
+				f"<td><a href='/{row}-{column}'><img src='/{row}-{column}.png' "
+				f"alt='{row}-{column}'></a></td>"
+				for column in range(3)
+			) + "</tr>"
+			for row in range(2)
+		) + "</table>"
+
+		for profile, expected_size in (
+			(SgxProfile(SGX_MODE_0, 4), (56, 37)),
+			(SgxProfile(SGX_MODE_5, 16), (60, 40)),
+		):
+			with self.subTest(profile=profile):
+				requests = []
+
+				def fetch(url):
+					requests.append(url)
+					return images[len(requests) - 1]
+
+				document = build_dox_from_html(
+					html,
+					"https://retro.example/",
+					profile=profile,
+					image_fetcher=fetch,
+					dithering="none",
+				)
+				chunks = validate_dox(document)
+				graphics = _counted_records(chunks[b"GRPH"])
+
+				self.assertEqual(len(requests), 6)
+				self.assertEqual(chunks[b"TEXT"].count(b"\xff\x13"), 2)
+				self.assertEqual(chunks[b"LINK"][0], 6)
+				# The reserved eye icon is graphic 1. Each linked cell uses its image
+				# directly, without emitting the fallback icon marker.
+				self.assertEqual(len(graphics), 7)
+				self.assertNotIn(bytes((10, 2, 1, 0x80)), chunks[b"TEXT"])
+				for identity in range(1, 7):
+					self.assertIn(
+						bytes((10, 2, identity + 1, 0x80, identity, 1, 5, 1)),
+						chunks[b"TEXT"],
+					)
+				for graphic in graphics[1:]:
+					_width_bytes, width, height = struct.unpack_from("<HHH", graphic, 2)
+					self.assertEqual((width, height), expected_size)
+
+	def test_page_and_table_image_variants_share_one_source_fetch(self):
+		image = _png((0, 1) * (160 * 80 // 2), 160, 80)
+		page = "<img src='/same.png'>"
+		table = ("<table><tr><td><img src='/same.png'></td>"
+			"<td>Caption</td></tr></table>")
+		for html, expected_sizes in (
+			(page + table, [(160, 80), (88, 44)]),
+			(table + page, [(88, 44), (160, 80)]),
+		):
+			with self.subTest(html=html):
+				requests = []
+				document = build_dox_from_html(
+					html,
+					"https://example.com/",
+					image_fetcher=lambda url: requests.append(url) or image,
+					dithering="none",
+				)
+				chunks = validate_dox(document)
+				graphics = _counted_records(chunks[b"GRPH"])
+				sizes = [
+					struct.unpack_from("<HHH", graphic, 2)[1:] for graphic in graphics
+				]
+
+				self.assertEqual(requests, ["https://example.com/same.png"])
+				self.assertEqual(sizes, expected_sizes)
+				self.assertIn(bytes((10, 2, 1, 0x80, 0, 1, 5, 1)), chunks[b"TEXT"])
+				self.assertIn(bytes((10, 2, 2, 0x80, 0, 1, 5, 1)), chunks[b"TEXT"])
+				self.assertIn(b"\xff\x12", chunks[b"TEXT"])
+
+	def test_identical_converted_variants_share_one_graphic_record(self):
+		requests = []
+		image = _png((0, 1, 0, 1, 1, 0, 1, 0) * 8, 8, 8)
+		document = build_dox_from_html(
+			("<img src='/small.png'>"
+			 "<table><tr><td><img src='/small.png'></td><td>A</td></tr></table>"
+			 "<table><tr><td><img src='/small.png'></td><td>B</td><td>C</td></tr></table>"
+			 "<table><tr><td><img src='/small.png'></td><td>D</td><td>E</td><td>F</td>"
+			 "</tr></table>"),
+			"https://example.com/",
+			image_fetcher=lambda url: requests.append(url) or image,
+			dithering="none",
+		)
+		chunks = validate_dox(document)
+
+		self.assertEqual(requests, ["https://example.com/small.png"])
+		self.assertEqual(chunks[b"GRPH"][0], 1)
+		self.assertEqual(
+			chunks[b"TEXT"].count(bytes((10, 2, 1, 0x80, 0, 1, 5, 1))),
+			4,
+		)
+
+	def test_table_image_width_tracks_column_count_and_sgx_mode(self):
+		image = _png((0, 1) * (120 * 80 // 2), 120, 80)
+		expected = {
+			SGX_MODE_0: ((88, 59), (56, 37), (40, 27)),
+			SGX_MODE_5: ((92, 61), (60, 40), (44, 29)),
+		}
+		for profile in (SgxProfile(SGX_MODE_0, 4), SgxProfile(SGX_MODE_5, 16)):
+			for columns in (2, 3, 4):
+				with self.subTest(profile=profile, columns=columns):
+					requests = []
+					document = build_dox_from_html(
+						("<table><tr>" + "".join(
+							"<td><img src='/same.png'></td>" for _ in range(columns)
+						) + "</tr></table>"),
+						"https://example.com/",
+						profile=profile,
+						image_fetcher=lambda url: requests.append(url) or image,
+						dithering="none",
+					)
+					chunks = validate_dox(document)
+					graphic, = _counted_records(chunks[b"GRPH"])
+					_width_bytes, width, height = struct.unpack_from("<HHH", graphic, 2)
+
+					self.assertEqual(requests, ["https://example.com/same.png"])
+					self.assertEqual(chunks[b"TEXT"].count(bytes((0xff, 0x10 | columns))), 1)
+					self.assertEqual(graphic[1], profile.mode)
+					self.assertEqual((width, height), expected[profile.mode][columns - 2])
+
+	def test_failed_table_image_keeps_grid_and_alt_text(self):
+		document = build_dox_from_html(
+			("<table><tr><td><img src='/bad.png' alt='Unavailable'></td>"
+			 "<td>Caption</td></tr></table>"),
+			"https://example.com/",
+			image_fetcher=lambda _url: b"not an image",
+		)
+		chunks = validate_dox(document)
+
+		self.assertIn(b"\xff\x12", chunks[b"TEXT"])
+		self.assertIn(b"[Unavailable]", chunks[b"TEXT"])
+		self.assertIn(b"Caption", chunks[b"TEXT"])
+		self.assertEqual(chunks[b"GRPH"][0], 0)
+
+	def test_table_image_alt_is_bounded_without_rejecting_valid_grid(self):
+		alt = "A" * 2000
+		html = ("<table><tr><td><img src='/image.png' alt='" + alt + "'></td>"
+			"<td>Caption</td></tr></table>")
+		limits = DoxLimits(max_text_bytes=200)
+		valid_document = build_dox_from_html(
+			html,
+			"https://example.com/",
+			limits=limits,
+			image_fetcher=lambda _url: _png((0, 1) * 4, 8),
+		)
+		failed_document = build_dox_from_html(
+			html,
+			"https://example.com/",
+			limits=limits,
+			image_fetcher=lambda _url: b"not an image",
+		)
+		valid_text = validate_dox(valid_document, limits=limits)[b"TEXT"]
+		failed_text = validate_dox(failed_document, limits=limits)[b"TEXT"]
+
+		self.assertIn(b"\xff\x12", valid_text)
+		self.assertIn(b"\xff\x12", failed_text)
+		self.assertIn(b"[" + b"A" * 63 + b"]", failed_text)
+		self.assertNotIn(b"A" * 64, failed_text)
 
 	def test_table_near_text_limit_falls_back_without_a_partial_column_row(self):
 		limits = DoxLimits(max_text_bytes=64)
@@ -278,6 +464,21 @@ class DoxSerializationTests(unittest.TestCase):
 
 		self.assertNotIn(b"\xff\x12", text)
 		self.assertLessEqual(len(text), 64)
+
+	def test_table_image_alt_budget_falls_back_before_partial_grid(self):
+		limits = DoxLimits(max_text_bytes=80)
+		alt = "A" * 30
+		document = build_dox_from_html(
+			("<table><tr><td><img src='/one.png' alt='" + alt + "'></td>"
+			 "<td><img src='/two.png' alt='" + alt + "'></td></tr></table>"),
+			"https://example.com/",
+			limits=limits,
+			image_fetcher=lambda _url: b"not an image",
+		)
+		text = validate_dox(document, limits=limits)[b"TEXT"]
+
+		self.assertNotIn(b"\xff\x12", text)
+		self.assertLessEqual(len(text), 80)
 
 	def test_table_row_and_cell_policy_limits_use_the_same_atomic_fallback(self):
 		html = (

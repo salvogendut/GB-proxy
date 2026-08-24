@@ -770,6 +770,50 @@ class SymzillaDoxApplicationTests(unittest.TestCase):
 		])
 		self.assertNotIn(DOX_MIMETYPE, calls[1][2]["headers"]["Accept"])
 
+	def test_retrocheats_style_linked_image_table_stays_a_three_column_grid(self):
+		images = {
+			f"/{identity}.png": self._png(
+				tuple(1 if pixel < (identity + 1) * 20 else 0 for pixel in range(120)),
+				120,
+			)
+			for identity in range(6)
+		}
+		html = "<html><body><table>" + "".join(
+			"<tr>" + "".join(
+				f"<td><a href='/{identity}'><img src='/{identity}.png' "
+				f"alt='{identity}'></a></td>"
+				for identity in range(row * 3, row * 3 + 3)
+			) + "</tr>"
+			for row in range(2)
+		) + "</table></body></html>"
+
+		def upstream(method, url, **kwargs):
+			if url.endswith(".png"):
+				return SimpleNamespace(
+					content=images[urlparse(url).path],
+					status_code=200,
+					headers={"Content-Type": "image/png"},
+					url=url,
+				)
+			return SimpleNamespace(
+				content=html.encode("ascii"),
+				status_code=200,
+				headers={"Content-Type": "text/html"},
+				url="https://retro.example/",
+			)
+
+		response, calls = self._request(upstream, headers={
+			"Accept": DOX_MIMETYPE,
+			"X-GB-SGX": "0,4",
+		})
+		chunks = validate_dox(response.data)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(chunks[b"TEXT"].count(b"\xff\x13"), 2)
+		self.assertEqual(chunks[b"GRPH"][0], 7)
+		self.assertEqual(chunks[b"LINK"][0], 6)
+		self.assertEqual(len(calls), 7)
+
 	def test_q_zero_dox_accept_keeps_existing_html_behavior(self):
 		upstream = SimpleNamespace(
 			content=b"<html><body>ordinary</body></html>",

@@ -116,8 +116,10 @@ For compatibility with simple file servers, a URL path ending in `.md` or
 The supported safe subset includes headings, paragraphs, ordered and unordered
 lists, emphasis, code spans and blocks, tables, links, and remote images.
 GEOBENCH retains simple table markup. SymZilla renders rectangular tables with
-two to four columns and text or inline-link cells as framed DOX grids. Tables
-containing images or block content, and wider, nested, spanned, or ragged
+two to four columns and text, inline links, or remote images as framed DOX
+grids. Images are resized to the conservative per-column width and linked
+images remain directly clickable; a failed image keeps bounded alt text in the
+cell. Tables containing block content, or wider, nested, spanned, or ragged
 tables, fall back atomically to cell content in reading order.
 Relative link and image destinations are resolved against the final remote
 document URL after redirects. Remote HTTP or HTTPS images then pass through the
@@ -164,6 +166,13 @@ downloaded eagerly, resized to at most 160x96, quantized against the fixed
 SymbOS palette, and embedded as extended SGX graphic records. A directly
 requested image is returned as a one-image DOX document. Scripts, active
 content, and unsupported binary response types are not included.
+
+Images in simple framed table cells use smaller width limits derived from the
+table's column count and the DOX minimum render width. This prevents an image
+from overflowing its cell when the SymZilla window is narrowed. The same image
+URL may therefore produce separate page-sized and cell-sized SGX records while
+a bounded per-document source cache avoids duplicate downloads under the
+default limits.
 
 Bounded GET forms support one-line text/search fields and submit buttons.
 Hidden values and checked radio/checkbox defaults are retained in the short

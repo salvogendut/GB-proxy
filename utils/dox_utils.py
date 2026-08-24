@@ -32,7 +32,11 @@ DOX_MAX_FORM_ACTION_BYTES = 2048
 DOX_MAX_CONTROL_NAME_BYTES = 31
 DOX_MAX_CONTROL_VALUE_BYTES = 63
 DOX_MAX_CONTROL_LABEL_BYTES = 31
+DOX_MAX_TABLE_IMAGE_ALT_BYTES = 63
+DOX_MAX_IMAGE_SOURCE_CACHE_BYTES = 16 * 1024 * 1024
 DOX_DOCUMENT_OVERHEAD_RESERVE = 192
+DOX_MIN_DOCUMENT_WIDTH = 200
+DOX_MAX_DOCUMENT_WIDTH = 600
 _TEXT_TRAILER = b"\x04\x02\x01\x01\x00\xff"
 _TEXT_FORMAT_RESET = _TEXT_TRAILER[:-2]
 _FORM_MARKER_SUFFIX = b"\x80\x00\x01\x05\x01"
@@ -54,11 +58,12 @@ _REMOVED_TAGS = frozenset((
 ))
 _TABLE_INLINE_TAGS = frozenset((
 	"a", "abbr", "b", "bdi", "bdo", "br", "cite", "code", "data", "del",
-	"dfn", "em", "i", "ins", "kbd", "mark", "q", "s", "samp", "small",
+	"dfn", "em", "i", "img", "ins", "kbd", "mark", "q", "s", "samp", "small",
 	"span", "strong", "sub", "sup", "time", "u", "var", "wbr",
 ))
 _TABLE_COLUMN_HEADER_BYTES = 14
 _TABLE_CELL_STYLE = b"\x33\x23\x13"
+_TABLE_CELL_HORIZONTAL_OVERHEAD = 5
 
 
 class DoxError(ValueError):
@@ -287,6 +292,9 @@ class _DoxBuilder:
 		self._control_string_ids = {}
 		self._control_ids = {}
 		self._image_ids = {}
+		self._image_contents = {}
+		self._image_content_bytes = 0
+		self._graphic_ids = {}
 		self._graphics_bytes = 0
 		self._reserved_text_bytes = 0
 		self._link_icon_id = None
@@ -297,6 +305,7 @@ class _DoxBuilder:
 		self._table_fallback_depth = 0
 		self._table_rows = 0
 		self._table_cells = 0
+		self._table_image_width = None
 
 	def _append_control(self, data):
 		if (
@@ -344,6 +353,9 @@ class _DoxBuilder:
 		self._append_control(b"\x08\x03")
 
 	def _add_graphic(self, graphic):
+		graphic_id = self._graphic_ids.get(graphic)
+		if graphic_id is not None:
+			return graphic_id
 		if len(self.graphics) >= self.limits.max_graphics:
 			return None
 		if len(graphic) > DOX_MAX_GRAPHIC_ENTRY_BYTES:
@@ -352,7 +364,9 @@ class _DoxBuilder:
 			return None
 		self.graphics.append(graphic)
 		self._graphics_bytes += len(graphic)
-		return len(self.graphics)
+		graphic_id = len(self.graphics)
+		self._graphic_ids[graphic] = graphic_id
+		return graphic_id
 
 	def _add_link(self, value, *, unique=False, always_shorten=False):
 		url = _absolute_http_url(self.base_url, value)
@@ -415,75 +429,103 @@ class _DoxBuilder:
 		if graphic_id is not None:
 			self._insert_graphic(graphic_id, link_id)
 
+	def _image_fallback(self, alt):
+		if alt:
+			limit = DOX_MAX_TABLE_IMAGE_ALT_BYTES if self._table_image_width else None
+			alt = _ascii(alt, limit=limit).decode("ascii")
+			if alt:
+				self.append_text(f"[{alt}]")
+		return False
+
+	@staticmethod
+	def _image_source(node):
+		source = node.get("data-src") or node.get("data-original") or node.get("src")
+		if not source and node.get("srcset"):
+			source = str(node["srcset"]).split(",", 1)[0].strip().split(" ", 1)[0]
+		return source
+
 	def append_image(self, source, alt="", link_id=None, content=None):
-		key = None
+		max_width = min(
+			self.limits.max_image_width,
+			self._table_image_width or self.limits.max_image_width,
+		)
+		max_height = self.limits.max_image_height
+		source_key = None
 		if content is None:
 			if str(source).startswith("data:"):
 				content = _data_uri(str(source), self.limits.max_image_source_bytes)
 				if content is not None:
-					key = "data:" + hashlib.sha256(content).hexdigest()
+					source_key = "data:" + hashlib.sha256(content).hexdigest()
 			else:
 				target = _absolute_http_url(self.base_url, source)
 				if target is not None:
-					target = urljoin(self.base_url, str(source).strip())
-					key = target
-					graphic_id = self._image_ids.get(key)
-					if graphic_id is not None:
+					source_key = target
+					variant_key = (source_key, max_width, max_height)
+					if variant_key in self._image_ids:
+						graphic_id = self._image_ids[variant_key]
+						if graphic_id is None:
+							return self._image_fallback(alt)
 						return self._insert_graphic(graphic_id, link_id)
-					if len(self.graphics) >= self.limits.max_graphics:
-						if alt:
-							self.append_text(f"[{alt}]")
-						return False
-					if self._image_fetches >= self.limits.max_graphics:
-						if alt:
-							self.append_text(f"[{alt}]")
-						return False
-					self._image_fetches += 1
-					try:
-						content = self.image_fetcher(target) if self.image_fetcher else None
-					except Exception as error:
-						LOGGER.warning("Could not fetch DOX image %s: %s", target, error)
-						content = None
+					if source_key in self._image_contents:
+						content = self._image_contents[source_key]
+					else:
+						if len(self.graphics) >= self.limits.max_graphics:
+							return self._image_fallback(alt)
+						if self._image_fetches >= self.limits.max_graphics:
+							return self._image_fallback(alt)
+						self._image_fetches += 1
+						try:
+							content = self.image_fetcher(target) if self.image_fetcher else None
+						except Exception as error:
+							LOGGER.warning("Could not fetch DOX image %s: %s", target, error)
+							content = None
+						if (
+							content is not None
+							and len(content) <= self.limits.max_image_source_bytes
+							and self._image_content_bytes + len(content)
+							<= DOX_MAX_IMAGE_SOURCE_CACHE_BYTES
+						):
+							self._image_contents[source_key] = content
+							self._image_content_bytes += len(content)
+						elif content is None or len(content) > self.limits.max_image_source_bytes:
+							self._image_contents[source_key] = None
 		if content is None or len(content) > self.limits.max_image_source_bytes:
-			if alt:
-				self.append_text(f"[{alt}]")
-			return False
-		if key is None:
-			key = "content:" + hashlib.sha256(content).hexdigest()
-		graphic_id = self._image_ids.get(key)
-		if graphic_id is not None:
+			return self._image_fallback(alt)
+		if source_key is None:
+			source_key = "content:" + hashlib.sha256(content).hexdigest()
+		variant_key = (source_key, max_width, max_height)
+		if variant_key in self._image_ids:
+			graphic_id = self._image_ids[variant_key]
+			if graphic_id is None:
+				return self._image_fallback(alt)
 			return self._insert_graphic(graphic_id, link_id)
 		if len(self.graphics) >= self.limits.max_graphics:
-			if alt:
-				self.append_text(f"[{alt}]")
-			return False
+			return self._image_fallback(alt)
 		if self._image_conversions >= self.limits.max_graphics:
-			if alt:
-				self.append_text(f"[{alt}]")
-			return False
+			return self._image_fallback(alt)
 		self._image_conversions += 1
 		try:
 			graphic = convert_to_sgx(
 				content,
 				mode=self.profile.mode,
 				colours=self.profile.colours,
-				max_width=self.limits.max_image_width,
-				max_height=self.limits.max_image_height,
+				max_width=max_width,
+				max_height=max_height,
 				dithering=self.dithering,
 				max_image_pixels=self.limits.max_image_pixels,
 				svg_timeout=self.svg_timeout,
 				max_intermediate_bytes=self.limits.max_image_source_bytes,
 			)
 		except Exception as error:
-			LOGGER.warning("Could not convert DOX image %s: %s", key, error)
+			LOGGER.warning("Could not convert DOX image %s: %s", source_key, error)
 			graphic = None
+		graphic_id = None
 		if graphic is not None:
 			graphic_id = self._add_graphic(graphic)
 		if graphic_id is None:
-			if alt:
-				self.append_text(f"[{alt}]")
-			return False
-		self._image_ids[key] = graphic_id
+			self._image_ids[variant_key] = None
+			return self._image_fallback(alt)
+		self._image_ids[variant_key] = graphic_id
 		return self._insert_graphic(graphic_id, link_id)
 
 	@staticmethod
@@ -773,6 +815,11 @@ class _DoxBuilder:
 		name = node.name.lower()
 		if name == "br":
 			return 2
+		if name == "img":
+			alt = _ascii(
+				node.get("alt", ""), limit=DOX_MAX_TABLE_IMAGE_ALT_BYTES
+			)
+			return max(8, len(alt) + 2 if alt else 0)
 		budget = sum(self._table_inline_budget(child) for child in node.children)
 		if name == "a":
 			budget += 8
@@ -791,11 +838,19 @@ class _DoxBuilder:
 					budget += 6
 		return budget
 
-	def _render_table_cell(self, cell):
+	def _render_table_cell(self, cell, column_count):
 		text = self.text
 		paragraph_open = self._standard_paragraph_open
+		table_image_width = self._table_image_width
 		self.text = bytearray()
 		self._standard_paragraph_open = False
+		# RENILN does not clip an oversized first inline object. Size against the
+		# document's minimum render width so the cell remains safe when SymZilla's
+		# window is narrowed. The canonical framed geometry consumes five pixels.
+		self._table_image_width = min(
+			self.limits.max_image_width,
+			DOX_MIN_DOCUMENT_WIDTH // column_count - _TABLE_CELL_HORIZONTAL_OVERHEAD,
+		)
 		try:
 			if cell.name.lower() == "th":
 				self._append_control(b"\x02\x03\x01")
@@ -806,6 +861,7 @@ class _DoxBuilder:
 		finally:
 			self.text = text
 			self._standard_paragraph_open = paragraph_open
+			self._table_image_width = table_image_width
 
 	def _render_table(self, table):
 		rows = self._simple_table_rows(table)
@@ -830,7 +886,7 @@ class _DoxBuilder:
 			for column, cell in enumerate(cells):
 				start = len(row)
 				row.extend(_table_column_header(column, column_count))
-				row.extend(self._render_table_cell(cell))
+				row.extend(self._render_table_cell(cell, column_count))
 				row.append(0)
 				delta = len(row) - start
 				if not _TABLE_COLUMN_HEADER_BYTES + 1 <= delta <= 0xffff:
@@ -906,9 +962,7 @@ class _DoxBuilder:
 			self.line_break()
 			return
 		if name == "img":
-			source = node.get("data-src") or node.get("data-original") or node.get("src")
-			if not source and node.get("srcset"):
-				source = str(node["srcset"]).split(",", 1)[0].strip().split(" ", 1)[0]
+			source = self._image_source(node)
 			if source:
 				self.append_image(source, node.get("alt", ""), link_id=link_id)
 			return
@@ -962,7 +1016,9 @@ class _DoxBuilder:
 		info = b"".join(_ascii(value)[:63] + b"\x00" for value in info_values)[:255]
 		if not info.endswith(b"\x00"):
 			info = info[:-1] + b"\x00"
-		head = struct.pack("<HHBB", 200, 600, 0, 2)
+		head = struct.pack(
+			"<HHBB", DOX_MIN_DOCUMENT_WIDTH, DOX_MAX_DOCUMENT_WIDTH, 0, 2
+		)
 		graphics = bytes((len(self.graphics),))
 		graphics += b"".join(struct.pack("<H", len(item)) for item in self.graphics)
 		graphics += b"".join(self.graphics)
