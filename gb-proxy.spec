@@ -1,6 +1,6 @@
 Name:           gb-proxy
 Version:        0.3.0
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        HTTP proxy for GEOBENCH and SymZilla on SymbOS
 
 License:        BSD-3-Clause
@@ -79,6 +79,10 @@ install -Dpm 0640 config.py.example %{buildroot}%{_sysconfdir}/%{name}/config.py
 
 
 %changelog
+* Mon Aug 24 2026 Salvatore Bognanni <salvogendut@users.noreply.github.com> - 0.3.0-3
+- Render linked images inside simple SymZilla DOX table cells
+- Size table images conservatively and reuse source downloads across variants
+
 * Mon Aug 24 2026 Salvatore Bognanni <salvogendut@users.noreply.github.com> - 0.3.0-2
 - Render simple bounded HTML and Markdown tables as SymZilla DOX columns
 - Preserve readable source order for unsupported table layouts
