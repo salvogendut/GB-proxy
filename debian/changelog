@@ -1,3 +1,11 @@
+gb-proxy (0.3.2-1) trixie; urgency=medium
+
+  * Center bounded legacy image grids using their declared cell geometry.
+  * Retain full-sized table images while keeping fitted columns safe and
+    contiguous.
+
+ -- Salvatore Bognanni <salvogendut@users.noreply.github.com>  Mon, 24 Aug 2026 18:12:43 +0200
+
 gb-proxy (0.3.1-1) trixie; urgency=medium
 
   * Render simple bounded HTML and Markdown tables as SymZilla columns.

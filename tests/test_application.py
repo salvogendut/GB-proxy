@@ -560,8 +560,8 @@ class MarkdownApplicationTests(unittest.TestCase):
 
 class SymzillaDoxApplicationTests(unittest.TestCase):
 	@staticmethod
-	def _png(indexes, width):
-		image = Image.new("RGB", (width, 1))
+	def _png(indexes, width, height=1):
+		image = Image.new("RGB", (width, height))
 		image.putdata([SYMBOS_PALETTE[index] for index in indexes])
 		output = io.BytesIO()
 		image.save(output, format="PNG")
@@ -773,19 +773,27 @@ class SymzillaDoxApplicationTests(unittest.TestCase):
 	def test_retrocheats_style_linked_image_table_stays_a_three_column_grid(self):
 		images = {
 			f"/{identity}.png": self._png(
-				tuple(1 if pixel < (identity + 1) * 20 else 0 for pixel in range(120)),
+				tuple(
+					1 if pixel % 120 < (identity + 1) * 20 else 0
+					for pixel in range(120 * 80)
+				),
 				120,
+				80,
 			)
 			for identity in range(6)
 		}
-		html = "<html><body><table>" + "".join(
+		html = (
+			"<html><body><center><table border='0' cellpadding='2' cellspacing='0' "
+			"width='384'>" + "".join(
 			"<tr>" + "".join(
-				f"<td><a href='/{identity}'><img src='/{identity}.png' "
+				f"<td width='128' align='center'><a href='/{identity}'>"
+				f"<img src='/{identity}.png' width='120' height='80' border='0' "
 				f"alt='{identity}'></a></td>"
 				for identity in range(row * 3, row * 3 + 3)
 			) + "</tr>"
 			for row in range(2)
-		) + "</table></body></html>"
+		) + "</table></center></body></html>"
+		)
 
 		def upstream(method, url, **kwargs):
 			if url.endswith(".png"):
@@ -799,7 +807,7 @@ class SymzillaDoxApplicationTests(unittest.TestCase):
 				content=html.encode("ascii"),
 				status_code=200,
 				headers={"Content-Type": "text/html"},
-				url="https://retro.example/",
+				url="https://retrocheats.neocities.org/",
 			)
 
 		response, calls = self._request(upstream, headers={
@@ -809,10 +817,19 @@ class SymzillaDoxApplicationTests(unittest.TestCase):
 		chunks = validate_dox(response.data)
 
 		self.assertEqual(response.status_code, 200)
+		self.assertEqual(struct.unpack("<HHBB", chunks[b"HEAD"]), (384, 600, 0, 2))
 		self.assertEqual(chunks[b"TEXT"].count(b"\xff\x13"), 2)
+		self.assertEqual(chunks[b"TEXT"].count(b"\x09\x01\x03\x01"), 6)
 		self.assertEqual(chunks[b"GRPH"][0], 7)
 		self.assertEqual(chunks[b"LINK"][0], 6)
 		self.assertEqual(len(calls), 7)
+		self.assertEqual(
+			[call[1] for call in calls[1:]],
+			[
+				f"https://retrocheats.neocities.org/{identity}.png"
+				for identity in range(6)
+			],
+		)
 
 	def test_q_zero_dox_accept_keeps_existing_html_behavior(self):
 		upstream = SimpleNamespace(
