@@ -304,8 +304,8 @@ rpmbuild -ba gb-proxy.spec
 Install a downloaded package using the matching distribution package manager:
 
 ```shell
-sudo dnf install ./gb-proxy-0.3.1-1.fc44.noarch.rpm
-sudo apt install ./gb-proxy_0.3.1-1_all.deb
+sudo dnf install ./gb-proxy-0.3.2-1.fc44.noarch.rpm
+sudo apt install ./gb-proxy_0.3.2-1_all.deb
 ```
 
 GitHub Actions builds the binary and source RPMs plus the Debian package for
