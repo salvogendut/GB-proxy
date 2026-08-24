@@ -35,6 +35,17 @@ def _serialized_chunk(document, name):
 	return None
 
 
+def _counted_records(payload):
+	count = payload[0]
+	lengths = struct.unpack_from(f"<{count}H", payload, 1) if count else ()
+	offset = 1 + count * 2
+	records = []
+	for length in lengths:
+		records.append(payload[offset:offset + length])
+		offset += length
+	return records
+
+
 def _replace_chunk(document, name, payload):
 	result = bytearray()
 	offset = 0
@@ -153,6 +164,354 @@ class DoxSerializationTests(unittest.TestCase):
 		self.assertIn(b"Hello", chunks[b"TEXT"])
 		self.assertIn(b"World", chunks[b"TEXT"])
 		self.assertNotIn(b"SECRET", chunks[b"TEXT"])
+
+	def test_simple_table_has_exact_current_symzilla_column_vector(self):
+		document = build_dox_from_html(
+			("<table><tr><th>A</th><th>B</th></tr>"
+			 "<tr><td>1</td><td>2</td></tr></table>"),
+			"http://example.com/",
+		)
+		text = validate_dox(document)[b"TEXT"]
+
+		self.assertEqual(text, bytes.fromhex(
+			"ff 12 "
+			"0e 16 00 05 01 01 02 ff ff 02 02 33 23 13 "
+			"02 03 01 41 02 01 01 00 "
+			"0e 16 00 03 01 02 02 ff ff 02 02 33 23 13 "
+			"02 03 01 42 02 01 01 00 00 "
+			"ff 12 "
+			"0e 10 00 05 01 01 02 ff ff 02 02 33 23 13 31 00 "
+			"0e 10 00 03 01 02 02 ff ff 02 02 33 23 13 32 00 00 "
+			"04 02 01 01 00 ff"
+		))
+
+	def test_four_column_geometry_uses_marked_signed_coefficients(self):
+		document = build_dox_from_html(
+			"<table><tr>" + "".join(f"<td>{value}</td>" for value in "ABCD")
+			+ "</tr></table>",
+			"http://example.com/",
+		)
+		text = validate_dox(document)[b"TEXT"]
+		offset = 2
+		geometries = []
+		for _ in range(4):
+			geometries.append(text[offset + 3:offset + 11])
+			offset += struct.unpack_from("<H", text, offset + 1)[0]
+
+		self.assertEqual(geometries, [
+			bytes.fromhex("05 01 01 04 ff ff 02 04"),
+			bytes.fromhex("03 01 02 04 ff ff 02 04"),
+			bytes.fromhex("01 01 03 04 ff ff 02 04"),
+			bytes.fromhex("ff ff 04 04 ff ff 02 04"),
+		])
+
+	def test_table_boundaries_preserve_surrounding_standard_text(self):
+		document = build_dox_from_html(
+			("<p>Before</p><table><tr><td>Left</td><td>Right</td></tr></table>"
+			 "<p>After</p>"),
+			"http://example.com/",
+		)
+		text = validate_dox(document)[b"TEXT"]
+
+		self.assertLess(text.index(b"Before"), text.index(b"\xff\x12"))
+		self.assertLess(text.index(b"\xff\x12"), text.index(b"After"))
+		self.assertIn(b"\x04\x02\x01\x01\x00\x00\xff\x12", text)
+
+	def test_inline_table_links_keep_the_existing_clickable_icon(self):
+		document = build_dox_from_html(
+			("<table><tr><td><a href='/left'>Left</a></td>"
+			 "<td><strong>Right</strong></td></tr></table>"),
+			"https://example.com/start",
+		)
+		chunks = validate_dox(document)
+
+		self.assertEqual(chunks[b"LINK"][0], 1)
+		self.assertIn(b"\x00https://example.com/left\x00", chunks[b"LINK"])
+		self.assertIn(bytes((10, 2, 1, 0x80, 1, 1, 5, 1)), chunks[b"TEXT"])
+		self.assertIn(b"\x02\x03\x01Right\x02\x01\x01", chunks[b"TEXT"])
+
+	def test_unsupported_tables_fall_back_wholly_in_source_order(self):
+		cases = (
+			("<table><tr><td colspan='2'>A</td><td>B</td></tr></table>", (b"A", b"B")),
+			(
+				"<table><tr><td>A</td><td>B</td></tr><tr><td>C</td></tr></table>",
+				(b"A", b"B", b"C"),
+			),
+			(
+				"<table><tr>" + "".join(f"<td>{value}</td>" for value in "ABCDE")
+				+ "</tr></table>",
+				tuple(value.encode("ascii") for value in "ABCDE"),
+			),
+			(
+				("<table><tr><td>Outer<table><tr><td>Inner</td><td>Grid</td></tr>"
+				 "</table></td><td>End</td></tr></table>"),
+				(b"Outer", b"Inner", b"Grid", b"End"),
+			),
+			(
+				("<table><tr><td><div><img src='/x.png' alt='Picture'></div></td>"
+				 "<td>End</td></tr></table>"),
+				(b"Picture", b"End"),
+			),
+		)
+		for html, labels in cases:
+			with self.subTest(html=html):
+				document = build_dox_from_html(html, "http://example.com/")
+				text = validate_dox(document)[b"TEXT"]
+				self.assertNotIn(b"\xff\x12", text)
+				positions = [text.index(label) for label in labels]
+				self.assertEqual(positions, sorted(positions))
+
+	def test_unsupported_image_table_fallback_keeps_page_sized_sgx(self):
+		requests = []
+		image = _png((0, 1) * (160 * 80 // 2), 160, 80)
+		document = build_dox_from_html(
+			("<table><tr><td colspan='2'><img src='/picture.png' alt='Picture'></td>"
+			 "<td>Caption</td></tr></table>"),
+			"http://example.com/",
+			image_fetcher=lambda url: requests.append(url) or image,
+		)
+		chunks = validate_dox(document)
+		graphics = _counted_records(chunks[b"GRPH"])
+
+		self.assertEqual(requests, ["http://example.com/picture.png"])
+		self.assertNotIn(b"\xff\x12", chunks[b"TEXT"])
+		self.assertEqual(len(graphics), 1)
+		self.assertEqual(struct.unpack_from("<HHH", graphics[0], 2)[1:], (160, 80))
+		self.assertIn(bytes((10, 2, 1, 0x80, 0, 1, 5, 1)), chunks[b"TEXT"])
+		self.assertIn(b"Caption", chunks[b"TEXT"])
+
+	def test_retrocheats_linked_image_grid_uses_cell_sized_sgx(self):
+		images = [
+			_png(tuple(
+				1 if pixel % 120 < (identity + 1) * 20 else 0
+				for pixel in range(120 * 80)
+			), 120, 80)
+			for identity in range(6)
+		]
+		html = "<table>" + "".join(
+			"<tr>" + "".join(
+				f"<td><a href='/{row}-{column}'><img src='/{row}-{column}.png' "
+				f"alt='{row}-{column}'></a></td>"
+				for column in range(3)
+			) + "</tr>"
+			for row in range(2)
+		) + "</table>"
+
+		for profile, expected_size in (
+			(SgxProfile(SGX_MODE_0, 4), (56, 37)),
+			(SgxProfile(SGX_MODE_5, 16), (60, 40)),
+		):
+			with self.subTest(profile=profile):
+				requests = []
+
+				def fetch(url):
+					requests.append(url)
+					return images[len(requests) - 1]
+
+				document = build_dox_from_html(
+					html,
+					"https://retro.example/",
+					profile=profile,
+					image_fetcher=fetch,
+					dithering="none",
+				)
+				chunks = validate_dox(document)
+				graphics = _counted_records(chunks[b"GRPH"])
+
+				self.assertEqual(len(requests), 6)
+				self.assertEqual(chunks[b"TEXT"].count(b"\xff\x13"), 2)
+				self.assertEqual(chunks[b"LINK"][0], 6)
+				# The reserved eye icon is graphic 1. Each linked cell uses its image
+				# directly, without emitting the fallback icon marker.
+				self.assertEqual(len(graphics), 7)
+				self.assertNotIn(bytes((10, 2, 1, 0x80)), chunks[b"TEXT"])
+				for identity in range(1, 7):
+					self.assertIn(
+						bytes((10, 2, identity + 1, 0x80, identity, 1, 5, 1)),
+						chunks[b"TEXT"],
+					)
+				for graphic in graphics[1:]:
+					_width_bytes, width, height = struct.unpack_from("<HHH", graphic, 2)
+					self.assertEqual((width, height), expected_size)
+
+	def test_page_and_table_image_variants_share_one_source_fetch(self):
+		image = _png((0, 1) * (160 * 80 // 2), 160, 80)
+		page = "<img src='/same.png'>"
+		table = ("<table><tr><td><img src='/same.png'></td>"
+			"<td>Caption</td></tr></table>")
+		for html, expected_sizes in (
+			(page + table, [(160, 80), (88, 44)]),
+			(table + page, [(88, 44), (160, 80)]),
+		):
+			with self.subTest(html=html):
+				requests = []
+				document = build_dox_from_html(
+					html,
+					"https://example.com/",
+					image_fetcher=lambda url: requests.append(url) or image,
+					dithering="none",
+				)
+				chunks = validate_dox(document)
+				graphics = _counted_records(chunks[b"GRPH"])
+				sizes = [
+					struct.unpack_from("<HHH", graphic, 2)[1:] for graphic in graphics
+				]
+
+				self.assertEqual(requests, ["https://example.com/same.png"])
+				self.assertEqual(sizes, expected_sizes)
+				self.assertIn(bytes((10, 2, 1, 0x80, 0, 1, 5, 1)), chunks[b"TEXT"])
+				self.assertIn(bytes((10, 2, 2, 0x80, 0, 1, 5, 1)), chunks[b"TEXT"])
+				self.assertIn(b"\xff\x12", chunks[b"TEXT"])
+
+	def test_identical_converted_variants_share_one_graphic_record(self):
+		requests = []
+		image = _png((0, 1, 0, 1, 1, 0, 1, 0) * 8, 8, 8)
+		document = build_dox_from_html(
+			("<img src='/small.png'>"
+			 "<table><tr><td><img src='/small.png'></td><td>A</td></tr></table>"
+			 "<table><tr><td><img src='/small.png'></td><td>B</td><td>C</td></tr></table>"
+			 "<table><tr><td><img src='/small.png'></td><td>D</td><td>E</td><td>F</td>"
+			 "</tr></table>"),
+			"https://example.com/",
+			image_fetcher=lambda url: requests.append(url) or image,
+			dithering="none",
+		)
+		chunks = validate_dox(document)
+
+		self.assertEqual(requests, ["https://example.com/small.png"])
+		self.assertEqual(chunks[b"GRPH"][0], 1)
+		self.assertEqual(
+			chunks[b"TEXT"].count(bytes((10, 2, 1, 0x80, 0, 1, 5, 1))),
+			4,
+		)
+
+	def test_table_image_width_tracks_column_count_and_sgx_mode(self):
+		image = _png((0, 1) * (120 * 80 // 2), 120, 80)
+		expected = {
+			SGX_MODE_0: ((88, 59), (56, 37), (40, 27)),
+			SGX_MODE_5: ((92, 61), (60, 40), (44, 29)),
+		}
+		for profile in (SgxProfile(SGX_MODE_0, 4), SgxProfile(SGX_MODE_5, 16)):
+			for columns in (2, 3, 4):
+				with self.subTest(profile=profile, columns=columns):
+					requests = []
+					document = build_dox_from_html(
+						("<table><tr>" + "".join(
+							"<td><img src='/same.png'></td>" for _ in range(columns)
+						) + "</tr></table>"),
+						"https://example.com/",
+						profile=profile,
+						image_fetcher=lambda url: requests.append(url) or image,
+						dithering="none",
+					)
+					chunks = validate_dox(document)
+					graphic, = _counted_records(chunks[b"GRPH"])
+					_width_bytes, width, height = struct.unpack_from("<HHH", graphic, 2)
+
+					self.assertEqual(requests, ["https://example.com/same.png"])
+					self.assertEqual(chunks[b"TEXT"].count(bytes((0xff, 0x10 | columns))), 1)
+					self.assertEqual(graphic[1], profile.mode)
+					self.assertEqual((width, height), expected[profile.mode][columns - 2])
+
+	def test_failed_table_image_keeps_grid_and_alt_text(self):
+		document = build_dox_from_html(
+			("<table><tr><td><img src='/bad.png' alt='Unavailable'></td>"
+			 "<td>Caption</td></tr></table>"),
+			"https://example.com/",
+			image_fetcher=lambda _url: b"not an image",
+		)
+		chunks = validate_dox(document)
+
+		self.assertIn(b"\xff\x12", chunks[b"TEXT"])
+		self.assertIn(b"[Unavailable]", chunks[b"TEXT"])
+		self.assertIn(b"Caption", chunks[b"TEXT"])
+		self.assertEqual(chunks[b"GRPH"][0], 0)
+
+	def test_table_image_alt_is_bounded_without_rejecting_valid_grid(self):
+		alt = "A" * 2000
+		html = ("<table><tr><td><img src='/image.png' alt='" + alt + "'></td>"
+			"<td>Caption</td></tr></table>")
+		limits = DoxLimits(max_text_bytes=200)
+		valid_document = build_dox_from_html(
+			html,
+			"https://example.com/",
+			limits=limits,
+			image_fetcher=lambda _url: _png((0, 1) * 4, 8),
+		)
+		failed_document = build_dox_from_html(
+			html,
+			"https://example.com/",
+			limits=limits,
+			image_fetcher=lambda _url: b"not an image",
+		)
+		valid_text = validate_dox(valid_document, limits=limits)[b"TEXT"]
+		failed_text = validate_dox(failed_document, limits=limits)[b"TEXT"]
+
+		self.assertIn(b"\xff\x12", valid_text)
+		self.assertIn(b"\xff\x12", failed_text)
+		self.assertIn(b"[" + b"A" * 63 + b"]", failed_text)
+		self.assertNotIn(b"A" * 64, failed_text)
+
+	def test_table_near_text_limit_falls_back_without_a_partial_column_row(self):
+		limits = DoxLimits(max_text_bytes=64)
+		document = build_dox_from_html(
+			("<table><tr><td>" + "A" * 40 + "</td><td>" + "B" * 40
+			 + "</td></tr></table>"),
+			"http://example.com/",
+			limits=limits,
+		)
+		text = validate_dox(document, limits=limits)[b"TEXT"]
+
+		self.assertNotIn(b"\xff\x12", text)
+		self.assertLessEqual(len(text), 64)
+
+	def test_table_image_alt_budget_falls_back_before_partial_grid(self):
+		limits = DoxLimits(max_text_bytes=80)
+		alt = "A" * 30
+		document = build_dox_from_html(
+			("<table><tr><td><img src='/one.png' alt='" + alt + "'></td>"
+			 "<td><img src='/two.png' alt='" + alt + "'></td></tr></table>"),
+			"https://example.com/",
+			limits=limits,
+			image_fetcher=lambda _url: b"not an image",
+		)
+		text = validate_dox(document, limits=limits)[b"TEXT"]
+
+		self.assertNotIn(b"\xff\x12", text)
+		self.assertLessEqual(len(text), 80)
+
+	def test_table_row_and_cell_policy_limits_use_the_same_atomic_fallback(self):
+		html = (
+			"<table><tr><td>A</td><td>B</td></tr>"
+			"<tr><td>C</td><td>D</td></tr></table>"
+		)
+		for limits in (
+			DoxLimits(max_table_rows=1),
+			DoxLimits(max_table_cells=3),
+		):
+			with self.subTest(limits=limits):
+				text = validate_dox(
+					build_dox_from_html(html, "http://example.com/", limits=limits),
+					limits=limits,
+				)[b"TEXT"]
+				self.assertNotIn(b"\xff\x12", text)
+				self.assertLess(text.index(b"A"), text.index(b"D"))
+
+	def test_adjacent_tables_share_document_limits_without_invalidating_output(self):
+		limits = DoxLimits(max_table_rows=2, max_table_cells=4)
+		document = build_dox_from_html(
+			("<table><tr><td>A</td><td>B</td></tr></table>"
+			 "<table><tr><td>C</td><td>D</td></tr>"
+			 "<tr><td>E</td><td>F</td></tr></table>"),
+			"http://example.com/",
+			limits=limits,
+		)
+		text = validate_dox(document, limits=limits)[b"TEXT"]
+
+		self.assertEqual(text.count(b"\xff\x12"), 1)
+		self.assertEqual([text.index(value) for value in b"ABCDEF"], sorted(
+			text.index(value) for value in b"ABCDEF"
+		))
 
 	def test_links_are_bounded_and_get_clickable_icon_graphic(self):
 		document = build_dox_from_html(
@@ -571,6 +930,52 @@ class DoxSerializationTests(unittest.TestCase):
 		duplicate_ctrl = _insert_before_end(document, b"CTRL", ctrl)
 		with self.assertRaisesRegex(DoxValidationError, "Duplicate DOX chunk CTRL"):
 			validate_dox(duplicate_ctrl)
+
+	def test_validator_rejects_corrupt_table_headers_geometry_and_jumps(self):
+		document = build_dox_from_html(
+			("<table><tr><td>A</td><td>B</td></tr>"
+			 "<tr><td>C</td><td>D</td></tr></table>"),
+			"http://example.com/",
+		)
+		text = validate_dox(document)[b"TEXT"]
+		mutations = []
+
+		bad_count = bytearray(text)
+		bad_count[1] = 0x11
+		mutations.append((bad_count, "column count"))
+		bad_header = bytearray(text)
+		bad_header[2] = 13
+		mutations.append((bad_header, "header length"))
+		bad_divisor = bytearray(text)
+		bad_divisor[8] = 0
+		mutations.append((bad_divisor, "geometry"))
+		inside_header = bytearray(text)
+		inside_header[3:5] = b"\x01\x00"
+		mutations.append((inside_header, "inside its header"))
+		past_text = bytearray(text)
+		past_text[3:5] = b"\xff\xff"
+		mutations.append((past_text, "past TEXT"))
+		missed_terminator = bytearray(text)
+		first_target = 2 + struct.unpack_from("<H", text, 3)[0]
+		missed_terminator[first_target - 1] = ord("X")
+		mutations.append((missed_terminator, "column jump"))
+		bad_follow = bytearray(text)
+		separator = text.index(b"\x00\x00\xff\x12")
+		bad_follow[separator + 1] = 1
+		mutations.append((bad_follow, "continuation"))
+
+		for mutated, message in mutations:
+			with self.subTest(message=message), self.assertRaisesRegex(
+				DoxValidationError, message
+			):
+				validate_dox(_replace_chunk(document, b"TEXT", bytes(mutated)))
+
+	def test_table_limits_reject_unsafe_native_column_counts(self):
+		for columns in (1, 16):
+			with self.subTest(columns=columns), self.assertRaisesRegex(
+				ValueError, "between 2 and 15"
+			):
+				DoxLimits(max_table_columns=columns)
 
 	def test_validator_rejects_corrupt_chunk_length(self):
 		document = bytearray(build_dox_from_html("<p>ok</p>", "http://example.com/"))

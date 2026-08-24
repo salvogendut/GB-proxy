@@ -1,3 +1,10 @@
+gb-proxy (0.3.1-1) trixie; urgency=medium
+
+  * Render simple bounded HTML and Markdown tables as SymZilla columns.
+  * Resize and link images within supported table cells.
+
+ -- Salvatore Bognanni <salvogendut@users.noreply.github.com>  Mon, 24 Aug 2026 17:15:00 +0200
+
 gb-proxy (0.3.0-1) trixie; urgency=medium
 
   * Render bounded, sanitized remote Markdown for GEOBENCH and SymZilla.

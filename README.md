@@ -115,8 +115,12 @@ For compatibility with simple file servers, a URL path ending in `.md` or
 
 The supported safe subset includes headings, paragraphs, ordered and unordered
 lists, emphasis, code spans and blocks, tables, links, and remote images.
-GEOBENCH retains simple table markup; SymZilla renders the cell content in
-reading order rather than as a grid.
+GEOBENCH retains simple table markup. SymZilla renders rectangular tables with
+two to four columns and text, inline links, or remote images as framed DOX
+grids. Images are resized to the conservative per-column width and linked
+images remain directly clickable; a failed image keeps bounded alt text in the
+cell. Tables containing block content, or wider, nested, spanned, or ragged
+tables, fall back atomically to cell content in reading order.
 Relative link and image destinations are resolved against the final remote
 document URL after redirects. Remote HTTP or HTTPS images then pass through the
 same download, size, conversion, and colour limits as images in HTML pages.
@@ -163,6 +167,13 @@ SymbOS palette, and embedded as extended SGX graphic records. A directly
 requested image is returned as a one-image DOX document. Scripts, active
 content, and unsupported binary response types are not included.
 
+Images in simple framed table cells use smaller width limits derived from the
+table's column count and the DOX minimum render width. This prevents an image
+from overflowing its cell when the SymZilla window is narrowed. The same image
+URL may therefore produce separate page-sized and cell-sized SGX records while
+a bounded per-document source cache avoids duplicate downloads under the
+default limits.
+
 Bounded GET forms support one-line text/search fields and submit buttons.
 Hidden values and checked radio/checkbox defaults are retained in the short
 action URL. POST forms, named submit values, and GET forms containing enabled
@@ -173,9 +184,10 @@ currently a submission shortcut.
 
 This is a deliberately constrained HTML-to-DOX conversion, not a complete web
 browser engine. It preserves useful text, headings, emphasis, links, supported
-images, and the bounded GET controls above. Scripts and styles are removed,
-complex layouts such as tables are flattened, and downloads, persistent login
-sessions, and arbitrary browser controls are outside the supported subset.
+images, simple framed tables, and the bounded GET controls above. Scripts and
+styles are removed; tables with merged cells or other complex layout are
+flattened; and downloads, persistent login sessions, and arbitrary browser
+controls are outside the supported subset.
 
 SymZilla represents a proxy-generated link with a small eye icon after its
 plain-text label. Activate the icon to follow the link; the label itself is not
@@ -282,8 +294,8 @@ rpmbuild -ba gb-proxy.spec
 Install a downloaded package using the matching distribution package manager:
 
 ```shell
-sudo dnf install ./gb-proxy-0.3.0-1.fc44.noarch.rpm
-sudo apt install ./gb-proxy_0.3.0-1_all.deb
+sudo dnf install ./gb-proxy-0.3.1-1.fc44.noarch.rpm
+sudo apt install ./gb-proxy_0.3.1-1_all.deb
 ```
 
 GitHub Actions builds the binary and source RPMs plus the Debian package for

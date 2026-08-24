@@ -1,4 +1,4 @@
-.TH GB-PROXY 1 "August 2026" "GB-proxy 0.3.0" "User Commands"
+.TH GB-PROXY 1 "August 2026" "GB-proxy 0.3.1" "User Commands"
 .SH NAME
 gb-proxy \- adapt modern web content for GEOBENCH and SymZilla
 .SH SYNOPSIS
@@ -42,6 +42,13 @@ targets up to 127 characters.  The GEOBENCH preset can retain plain-HTTP targets
 up to its 47-character link limit.  Longer links, GEOBENCH HTTPS links, and form
 actions use compact proxy-local tokens; those tokens remain visible in clients
 which do not keep a separate display URL.
+.PP
+SymZilla renders simple rectangular tables with two to four columns as framed
+DOX grids.  Cells may contain text, inline links, and remote images.  Table
+images are resized to a conservative per-column width so they remain inside
+their cells at the document's minimum render width; linked images remain
+directly clickable.  Wider, nested, spanned, ragged, or block-content tables
+fall back atomically to cell content in reading order.
 .SH REMOTE MARKDOWN
 GB-proxy renders remote Markdown for both client families.  GEOBENCH receives
 simplified HTML, while SymZilla receives a bounded DOX representation.  A
@@ -66,8 +73,8 @@ link and image destinations are resolved against the final remote document URL
 after redirects.  HTTP and HTTPS images use the same bounded conversion path
 as images in HTML pages.
 .PP
-GEOBENCH retains simple table markup.  SymZilla renders the cell content in
-reading order rather than as a grid.
+GEOBENCH retains simple table markup.  SymZilla uses the same framed table,
+cell-sized image, and readable fallback behaviour as ordinary HTML pages.
 .PP
 Raw HTML embedded in Markdown is inactive and cannot create scripts, forms,
 frames, links, image fetches, or other active elements.  Markdown forms are not

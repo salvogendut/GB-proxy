@@ -285,6 +285,26 @@ class MarkdownApplicationTests(unittest.TestCase):
 			calls[0][2]["headers"]["Accept"],
 		)
 
+	def test_markdown_pipe_table_uses_framed_dox_columns(self):
+		upstream = SimpleNamespace(
+			content=(
+				b"| Name | Value |\n"
+				b"| --- | --- |\n"
+				b"| Alpha | 1 |\n"
+			),
+			status_code=200,
+			headers={"Content-Type": "text/markdown"},
+			url="https://example.com/docs/readme.md",
+		)
+
+		response, _ = self._request(upstream, headers={"Accept": DOX_MIMETYPE})
+		text = validate_dox(response.data)[b"TEXT"]
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(text.count(b"\xff\x12"), 2)
+		self.assertIn(b"Name", text)
+		self.assertIn(b"Alpha", text)
+
 	def test_plain_text_markdown_suffix_converts_but_txt_stays_plain(self):
 		markdown = SimpleNamespace(
 			content=b"# Suffix detection",
@@ -749,6 +769,50 @@ class SymzillaDoxApplicationTests(unittest.TestCase):
 			"http://example.com/page", "http://example.com/logo.png",
 		])
 		self.assertNotIn(DOX_MIMETYPE, calls[1][2]["headers"]["Accept"])
+
+	def test_retrocheats_style_linked_image_table_stays_a_three_column_grid(self):
+		images = {
+			f"/{identity}.png": self._png(
+				tuple(1 if pixel < (identity + 1) * 20 else 0 for pixel in range(120)),
+				120,
+			)
+			for identity in range(6)
+		}
+		html = "<html><body><table>" + "".join(
+			"<tr>" + "".join(
+				f"<td><a href='/{identity}'><img src='/{identity}.png' "
+				f"alt='{identity}'></a></td>"
+				for identity in range(row * 3, row * 3 + 3)
+			) + "</tr>"
+			for row in range(2)
+		) + "</table></body></html>"
+
+		def upstream(method, url, **kwargs):
+			if url.endswith(".png"):
+				return SimpleNamespace(
+					content=images[urlparse(url).path],
+					status_code=200,
+					headers={"Content-Type": "image/png"},
+					url=url,
+				)
+			return SimpleNamespace(
+				content=html.encode("ascii"),
+				status_code=200,
+				headers={"Content-Type": "text/html"},
+				url="https://retro.example/",
+			)
+
+		response, calls = self._request(upstream, headers={
+			"Accept": DOX_MIMETYPE,
+			"X-GB-SGX": "0,4",
+		})
+		chunks = validate_dox(response.data)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(chunks[b"TEXT"].count(b"\xff\x13"), 2)
+		self.assertEqual(chunks[b"GRPH"][0], 7)
+		self.assertEqual(chunks[b"LINK"][0], 6)
+		self.assertEqual(len(calls), 7)
 
 	def test_q_zero_dox_accept_keeps_existing_html_behavior(self):
 		upstream = SimpleNamespace(
