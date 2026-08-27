@@ -16,6 +16,7 @@ from werkzeug.wrappers.response import Response as WerkzeugResponse
 from utils.dox_utils import (
 	DOX_MIMETYPE,
 	DoxLimits,
+	GbpcProfile,
 	build_dox_from_html,
 	build_dox_from_image,
 	parse_sgx_profile,
@@ -46,6 +47,8 @@ USER_AGENT = (
 _EXTENSION_NAME = re.compile(r"^[A-Za-z0-9_]+$")
 _GBPC_REQUEST_HEADER = "X-GBPC"
 _SGX_REQUEST_HEADER = "X-GB-SGX"
+_DOX_PROFILE_HEADER = "X-GB-DOX"
+_GEOBENCH_DOX_PROFILE = "geobench-1"
 _STANDARD_UPSTREAM_ACCEPT = (
 	"text/html, application/xhtml+xml, text/markdown;q=0.9, image/*;q=0.8, */*;q=0.1"
 )
@@ -104,6 +107,7 @@ class ProxyRuntime:
 	max_response_bytes: int
 	max_markdown_source_bytes: int
 	dox_limits: DoxLimits
+	geobench_dox_limits: DoxLimits
 	extensions: dict
 	domain_to_extension: dict
 	override_extension: str = None
@@ -260,6 +264,14 @@ def create_app(
 		("MAX_DOX_IMAGE_WIDTH", 160),
 		("MAX_DOX_IMAGE_HEIGHT", 96),
 		("MAX_DOX_URL_BYTES", 127),
+		("MAX_GEOBENCH_DOX_TEXT_BYTES", 4096),
+		("MAX_GEOBENCH_DOX_LINKS", 16),
+		("MAX_GEOBENCH_DOX_GRAPHICS", 127),
+		("MAX_GEOBENCH_DOX_GRAPHICS_BYTES", 8 * 1024),
+		("MAX_GEOBENCH_DOX_CONTROLS", 8),
+		("MAX_GEOBENCH_DOX_CONTROL_BYTES", 512),
+		("MAX_GEOBENCH_DOX_DOCUMENT_BYTES", 16 * 1024),
+		("MAX_GEOBENCH_DOX_URL_BYTES", 47),
 	):
 		_positive_setting(settings, name, default)
 	_positive_setting(settings, "IMAGE_REQUEST_TIMEOUT", 30, float)
@@ -304,6 +316,39 @@ def create_app(
 		)
 	except ValueError as error:
 		raise ConfigurationError(f"Invalid DOX limits: {error}") from error
+	try:
+		geobench_dox_limits = DoxLimits(
+			max_text_bytes=int(getattr(settings, "MAX_GEOBENCH_DOX_TEXT_BYTES", 4096)),
+			max_links=int(getattr(settings, "MAX_GEOBENCH_DOX_LINKS", 16)),
+			max_graphics=int(getattr(settings, "MAX_GEOBENCH_DOX_GRAPHICS", 127)),
+			max_graphics_bytes=int(
+				getattr(settings, "MAX_GEOBENCH_DOX_GRAPHICS_BYTES", 8 * 1024)
+			),
+			max_controls=int(getattr(settings, "MAX_GEOBENCH_DOX_CONTROLS", 8)),
+			max_control_bytes=int(
+				getattr(settings, "MAX_GEOBENCH_DOX_CONTROL_BYTES", 512)
+			),
+			max_document_bytes=int(
+				getattr(settings, "MAX_GEOBENCH_DOX_DOCUMENT_BYTES", 16 * 1024)
+			),
+			max_image_width=int(getattr(settings, "MAX_DOX_IMAGE_WIDTH", 160)),
+			max_image_height=int(getattr(settings, "MAX_DOX_IMAGE_HEIGHT", 96)),
+			max_image_source_bytes=min(
+				int(getattr(settings, "MAX_IMAGE_DOWNLOAD_BYTES", 16 * 1024 * 1024)),
+				int(getattr(settings, "MAX_INLINE_RESOURCE_BYTES", 2 * 1024 * 1024)),
+			),
+			max_image_pixels=int(
+				getattr(settings, "MAX_IMAGE_PIXELS", 16 * 1024 * 1024)
+			),
+			max_url_bytes=int(getattr(settings, "MAX_GEOBENCH_DOX_URL_BYTES", 47)),
+			max_table_columns=int(
+				getattr(settings, "MAX_GEOBENCH_DOX_TABLE_COLUMNS", 4)
+			),
+			max_table_rows=int(getattr(settings, "MAX_GEOBENCH_DOX_TABLE_ROWS", 24)),
+			max_table_cells=int(getattr(settings, "MAX_GEOBENCH_DOX_TABLE_CELLS", 96)),
+		)
+	except ValueError as error:
+		raise ConfigurationError(f"Invalid GEOBENCH DOX limits: {error}") from error
 
 	runtime = ProxyRuntime(
 		settings=settings,
@@ -322,6 +367,7 @@ def create_app(
 			settings, "MAX_MARKDOWN_SOURCE_BYTES", 1024 * 1024
 		),
 		dox_limits=dox_limits,
+		geobench_dox_limits=geobench_dox_limits,
 		extensions=extensions,
 		domain_to_extension=domain_to_extension,
 	)
@@ -338,15 +384,18 @@ def _pic_output_enabled(runtime):
 	) == "pic"
 
 
-def _requested_gbpc_mode(runtime):
+def _parse_gbpc_mode(offer):
 	"""Select the first advertised supported GBPC mode, defaulting safely."""
-	if not _pic_output_enabled(runtime):
-		return GBPC_MODE_1
-	offer = request.headers.get(_GBPC_REQUEST_HEADER, "")
 	parts = tuple(part.strip() for part in offer.split(","))
 	if not parts or any(part not in ("1", "7") for part in parts):
 		return GBPC_MODE_1
 	return GBPC_MODE_7 if parts[0] == "7" else GBPC_MODE_1
+
+
+def _requested_gbpc_mode(runtime):
+	if not _pic_output_enabled(runtime):
+		return GBPC_MODE_1
+	return _parse_gbpc_mode(request.headers.get(_GBPC_REQUEST_HEADER, ""))
 
 
 def _accepts_symbos_dox():
@@ -371,14 +420,37 @@ def _requested_sgx_profile():
 	return parse_sgx_profile(request.headers.get(_SGX_REQUEST_HEADER))
 
 
-def _cache_image(runtime, url, content=None, gbpc_mode=GBPC_MODE_1):
+def _requested_dox_profile(runtime):
+	"""Select the graphic codec for one explicitly negotiated DOX response."""
+	if request.headers.get(_DOX_PROFILE_HEADER, "").strip().lower() == _GEOBENCH_DOX_PROFILE:
+		return GbpcProfile(_parse_gbpc_mode(request.headers.get(_GBPC_REQUEST_HEADER, "")))
+	return _requested_sgx_profile()
+
+
+def _requests_dox():
+	"""Accept MIME negotiation or GEOBENCH's compact explicit profile header."""
+	return (
+		_accepts_symbos_dox()
+		or request.headers.get(_DOX_PROFILE_HEADER, "").strip().lower()
+		== _GEOBENCH_DOX_PROFILE
+	)
+
+
+def _cache_image(
+	runtime,
+	url,
+	content=None,
+	gbpc_mode=GBPC_MODE_1,
+	max_width=None,
+	max_height=None,
+):
 	settings = runtime.settings
 	return fetch_and_cache_image(
 		url,
 		content,
 		resize=settings.RESIZE_IMAGES,
-		max_width=settings.MAX_IMAGE_WIDTH,
-		max_height=settings.MAX_IMAGE_HEIGHT,
+		max_width=max_width or settings.MAX_IMAGE_WIDTH,
+		max_height=max_height or settings.MAX_IMAGE_HEIGHT,
 		convert=settings.CONVERT_IMAGES,
 		convert_to=settings.CONVERT_IMAGES_TO_FILETYPE,
 		dithering=settings.DITHERING_ALGORITHM,
@@ -523,7 +595,7 @@ def _handle_target_request(
 	url,
 	append_query=False,
 	gbpc_mode=GBPC_MODE_1,
-	sgx_profile=None,
+	dox_profile=None,
 ):
 	current_app.logger.info("Fetching upstream URL %s", urlparse(url)._replace(query="").geturl())
 	response = None
@@ -533,7 +605,7 @@ def _handle_target_request(
 			runtime,
 			url,
 			append_query=append_query,
-			dox_requested=sgx_profile is not None,
+			dox_requested=dox_profile is not None,
 		)
 		final_url = getattr(response, "url", url)
 		response_headers = dict(response.headers)
@@ -549,21 +621,21 @@ def _handle_target_request(
 			result,
 			final_url,
 			gbpc_mode=gbpc_mode,
-			sgx_profile=sgx_profile,
+			dox_profile=dox_profile,
 		)
 	except requests.Timeout:
 		current_app.logger.warning("Upstream request timed out for %s", url)
-		if sgx_profile is not None:
+		if dox_profile is not None:
 			return _dox_error_response(
 				runtime, 504, "Upstream timeout", "The remote server did not respond in time.",
-				sgx_profile, url,
+				dox_profile, url,
 			)
 		return abort(504, "Upstream request timed out")
 	except UpstreamResponseTooLarge as error:
 		current_app.logger.warning("%s", error)
-		if sgx_profile is not None:
+		if dox_profile is not None:
 			return _dox_error_response(
-				runtime, 502, "Response too large", str(error), sgx_profile, url,
+				runtime, 502, "Response too large", str(error), dox_profile, url,
 			)
 		return abort(502, "Upstream response is too large")
 	except HTTPException:
@@ -572,18 +644,18 @@ def _handle_target_request(
 		raise
 	except requests.RequestException:
 		current_app.logger.exception("Upstream request failed for %s", url)
-		if sgx_profile is not None:
+		if dox_profile is not None:
 			return _dox_error_response(
 				runtime, 502, "Connection failed", "Could not connect to the remote server.",
-				sgx_profile, url,
+				dox_profile, url,
 			)
 		return abort(502, "Upstream connection failed")
 	except Exception:
 		current_app.logger.exception("Unhandled proxy error for %s", url)
-		if sgx_profile is not None:
+		if dox_profile is not None:
 			return _dox_error_response(
 				runtime, 500, "Proxy error", "GB-proxy could not build this page.",
-				sgx_profile, url,
+				dox_profile, url,
 			)
 		return abort(500, "GB-proxy encountered an internal error")
 	finally:
@@ -630,12 +702,18 @@ def _fetch_dox_image(runtime, url):
 
 def _dox_response(runtime, content, status_code, content_type, url, profile):
 	settings = runtime.settings
+	limits = (
+		runtime.geobench_dox_limits if isinstance(profile, GbpcProfile)
+		else runtime.dox_limits
+	)
 	arguments = {
 		"profile": profile,
-		"limits": runtime.dox_limits,
+		"limits": limits,
 		"dithering": settings.DITHERING_ALGORITHM,
 		"svg_timeout": float(getattr(settings, "SVG_CONVERSION_TIMEOUT", 10)),
 	}
+	if isinstance(profile, GbpcProfile):
+		arguments["image_shortener"] = _shorten_dox_image
 	media_type = content_type.split(";", 1)[0].strip()
 	binary_without_type = (
 		not media_type
@@ -672,14 +750,17 @@ def _dox_response(runtime, content, status_code, content_type, url, profile):
 		document = build_dox_from_html(
 			content,
 			url,
-			image_fetcher=lambda image_url: _fetch_dox_image(runtime, image_url),
+			image_fetcher=(
+				None if isinstance(profile, GbpcProfile)
+				else lambda image_url: _fetch_dox_image(runtime, image_url)
+			),
 			link_shortener=_shorten_dox_link,
 			**arguments,
 		)
-	return _serialized_dox_response(document, status_code)
+	return _serialized_dox_response(document, status_code, profile)
 
 
-def _serialized_dox_response(document, status_code):
+def _serialized_dox_response(document, status_code, profile):
 	# Werkzeug correctly suppresses bodies (and sometimes entity headers) for
 	# body-forbidden statuses. SymZilla always needs the generated DOX body, so
 	# turn those upstream statuses into a displayable response.
@@ -688,7 +769,10 @@ def _serialized_dox_response(document, status_code):
 	result = Response(document, status=status_code, content_type=DOX_MIMETYPE)
 	result.headers["Content-Disposition"] = 'inline; filename="document.dox"'
 	result.vary.add("Accept")
-	result.vary.add(_SGX_REQUEST_HEADER)
+	result.vary.add(_DOX_PROFILE_HEADER)
+	result.vary.add(
+		_GBPC_REQUEST_HEADER if isinstance(profile, GbpcProfile) else _SGX_REQUEST_HEADER
+	)
 	return result
 
 
@@ -698,17 +782,33 @@ def _shorten_dox_link(target):
 	return f"{base_url}/u/{token}"
 
 
+def _shorten_dox_image(target, content=None, max_width=None, max_height=None):
+	token = register_resource(
+		"image",
+		target,
+		content,
+		max_width=max_width,
+		max_height=max_height,
+	)
+	base_url = current_app.config["GB_PROXY_ADVERTISE_URL"].rstrip("/")
+	return f"{base_url}/i/{token}.pic"
+
+
 def _dox_error_response(runtime, status_code, title, message, profile, url):
+	limits = (
+		runtime.geobench_dox_limits if isinstance(profile, GbpcProfile)
+		else runtime.dox_limits
+	)
 	document = build_dox_from_html(
 		("<html><head><title>" + html.escape(title) + "</title></head><body><h1>"
 		 + html.escape(title) + "</h1><p>" + html.escape(message) + "</p></body></html>"),
 		url,
 		profile=profile,
-		limits=runtime.dox_limits,
+		limits=limits,
 		dithering=runtime.settings.DITHERING_ALGORITHM,
 		svg_timeout=float(getattr(runtime.settings, "SVG_CONVERSION_TIMEOUT", 10)),
 	)
-	return _serialized_dox_response(document, status_code)
+	return _serialized_dox_response(document, status_code, profile)
 
 
 def _process_response(
@@ -716,7 +816,7 @@ def _process_response(
 	response,
 	url,
 	gbpc_mode=GBPC_MODE_1,
-	sgx_profile=None,
+	dox_profile=None,
 ):
 	varies_by_gbpc = False
 	if isinstance(response, tuple):
@@ -731,7 +831,7 @@ def _process_response(
 			headers = {}
 	elif isinstance(response, (Response, WerkzeugResponse)):
 		response_content_type = _header_value(response.headers, "Content-Type")
-		if sgx_profile is None and not is_markdown_response(response_content_type, url):
+		if dox_profile is None and not is_markdown_response(response_content_type, url):
 			return response
 		content = response.get_data()
 		status_code = response.status_code
@@ -751,21 +851,21 @@ def _process_response(
 				"Markdown source exceeds the "
 				f"{runtime.max_markdown_source_bytes}-byte limit"
 			)
-			if sgx_profile is not None:
+			if dox_profile is not None:
 				return _dox_error_response(
-					runtime, 502, "Response too large", message, sgx_profile, url
+					runtime, 502, "Response too large", message, dox_profile, url
 				)
 			return abort(502, message)
 		try:
 			content = markdown_to_html(content, content_type, url)
 		except MarkdownSafetyError as error:
-			if sgx_profile is not None:
+			if dox_profile is not None:
 				return _dox_error_response(
 					runtime,
 					502,
 					"Markdown too complex",
 					str(error),
-					sgx_profile,
+					dox_profile,
 					url,
 				)
 			return abort(502, str(error))
@@ -778,14 +878,14 @@ def _process_response(
 		content_type = headers["Content-Type"]
 
 	content_type = content_type.lower()
-	if sgx_profile is not None:
+	if dox_profile is not None:
 		return _dox_response(
 			runtime,
 			content,
 			status_code,
 			content_type,
 			url,
-			sgx_profile,
+			dox_profile,
 		)
 
 	if content_type.startswith("image/"):
@@ -895,14 +995,14 @@ def _process_response(
 def _register_routes(app, runtime):
 	@app.errorhandler(HTTPException)
 	def handle_http_error(error):
-		if not _accepts_symbos_dox():
+		if not _requests_dox():
 			return error
 		return _dox_error_response(
 			runtime,
 			error.code or 500,
 			error.name,
 			error.description,
-			_requested_sgx_profile(),
+			_requested_dox_profile(runtime),
 			request.url,
 		)
 
@@ -927,6 +1027,8 @@ def _register_routes(app, runtime):
 			resource.target,
 			resource.content,
 			gbpc_mode=gbpc_mode,
+			max_width=resource.max_width,
+			max_height=resource.max_height,
 		)
 		if not cached_url:
 			return abort(404, "Image could not be processed")
@@ -942,24 +1044,24 @@ def _register_routes(app, runtime):
 			resource.target,
 			append_query=True,
 			gbpc_mode=_requested_gbpc_mode(runtime),
-			sgx_profile=_requested_sgx_profile() if _accepts_symbos_dox() else None,
+			dox_profile=_requested_dox_profile(runtime) if _requests_dox() else None,
 		)
 
 	@app.route("/", defaults={"path": "/"}, methods=("GET", "POST"))
 	@app.route("/<path:path>", methods=("GET", "POST"))
 	def handle_request(path):
 		gbpc_mode = _requested_gbpc_mode(runtime)
-		sgx_profile = _requested_sgx_profile() if _accepts_symbos_dox() else None
+		dox_profile = _requested_dox_profile(runtime) if _requests_dox() else None
 		if _is_proxy_self_request():
 			# The request was addressed to the proxy rather than to an upstream
 			# site. Refuse it instead of fetching ourselves recursively.
-			if sgx_profile is not None:
+			if dox_profile is not None:
 				return _dox_error_response(
 					runtime,
 					400,
 					"Not a proxy request",
 					"Send an absolute URL through the proxy, for example http://example.com/.",
-					sgx_profile,
+					dox_profile,
 					request.url,
 				)
 			return abort(
@@ -974,7 +1076,7 @@ def _register_routes(app, runtime):
 				override_response,
 				request.url,
 				gbpc_mode=gbpc_mode,
-				sgx_profile=sgx_profile,
+				dox_profile=dox_profile,
 			)
 
 		matching_extension = _find_matching_extension(runtime, parsed_url.hostname)
@@ -984,15 +1086,15 @@ def _register_routes(app, runtime):
 				_handle_matching_extension(runtime, matching_extension),
 				request.url,
 				gbpc_mode=gbpc_mode,
-				sgx_profile=sgx_profile,
+				dox_profile=dox_profile,
 			)
 
-		if sgx_profile is None and is_image_url(request.url):
+		if dox_profile is None and is_image_url(request.url):
 			return _handle_image_request(runtime, request.url, gbpc_mode=gbpc_mode)
 		return _handle_target_request(
 			runtime,
 			request.url,
 			append_query=False,
 			gbpc_mode=gbpc_mode,
-			sgx_profile=sgx_profile,
+			dox_profile=dox_profile,
 		)

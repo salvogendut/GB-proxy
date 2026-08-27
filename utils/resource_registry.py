@@ -12,6 +12,8 @@ from typing import Optional
 class ProxyResource:
 	target: str
 	content: Optional[bytes] = None
+	max_width: Optional[int] = None
+	max_height: Optional[int] = None
 
 
 @dataclass
@@ -61,7 +63,7 @@ def configure_resources(max_entries=4096, ttl_seconds=3600, max_content_bytes=2 
 			_trim_registry(registry)
 
 
-def register_resource(kind, target, content=None):
+def register_resource(kind, target, content=None, max_width=None, max_height=None):
 	"""Register a target and return a compact, collision-safe token."""
 	if kind not in _resources:
 		raise ValueError(f"Unsupported resource kind: {kind}")
@@ -70,7 +72,16 @@ def register_resource(kind, target, content=None):
 			f"Inline resource exceeds the {_max_content_bytes}-byte registry limit"
 		)
 
-	resource = ProxyResource(target=target, content=content)
+	if max_width is not None and (not isinstance(max_width, int) or max_width < 1):
+		raise ValueError("max_width must be a positive integer or None")
+	if max_height is not None and (not isinstance(max_height, int) or max_height < 1):
+		raise ValueError("max_height must be a positive integer or None")
+	resource = ProxyResource(
+		target=target,
+		content=content,
+		max_width=max_width,
+		max_height=max_height,
+	)
 	digest = hashlib.sha256()
 	digest.update(kind.encode("ascii"))
 	digest.update(b"\0")
@@ -78,6 +89,11 @@ def register_resource(kind, target, content=None):
 	if content is not None:
 		digest.update(b"\0")
 		digest.update(content)
+	if max_width is not None or max_height is not None:
+		digest.update(b"\0")
+		digest.update(str(max_width).encode("ascii"))
+		digest.update(b"x")
+		digest.update(str(max_height).encode("ascii"))
 	hexdigest = digest.hexdigest()
 
 	now = time.monotonic()

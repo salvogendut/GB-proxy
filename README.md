@@ -12,15 +12,16 @@ It is a downstream fork of
 [MacProxy](https://github.com/rdmark/macproxy). This fork adds dedicated support
 for two client families:
 
-- GEOBENCH's `BROWSER.APP`, using simplified HTML and portable GBPC v2 images;
+- GEOBENCH's `BROWSER.APP`, using bounded DOX with portable GBPC v2 images
+  while retaining simplified HTML for older builds;
 - SymZilla on SymbOS, using bounded DOX documents and negotiated SGX images.
 
 GB-proxy is the server-side transcoder, not the client network stack or browser
-renderer. GEOBENCH renders the simplified HTML/GBPC response; SymZilla renders
-the DOX/SGX response. Both clients connect to GB-proxy over plain HTTP, while
-GB-proxy performs HTTP or HTTPS requests to upstream sites. Configure its
-address as the client's proxy endpoint; opening the proxy root directly is not
-a browsing interface.
+renderer. Current GEOBENCH builds render the negotiated DOX/GBPC response;
+older builds render simplified HTML/GBPC, and SymZilla renders DOX/SGX. Both
+clients connect to GB-proxy over plain HTTP, while GB-proxy performs HTTP or
+HTTPS requests to upstream sites. Configure its address as the client's proxy
+endpoint; opening the proxy root directly is not a browsing interface.
 
 ## Quick start from a checkout
 
@@ -58,8 +59,8 @@ is used. It does not install or upgrade packages on every proxy restart.
 especially important on multihomed hosts. Configure the resulting proxy address
 on each client:
 
-- in GEOBENCH's `BROWSER.APP`, open **Settings → Proxy** and enter the full
-  URL, for example `http://192.168.1.10:5001`;
+- in GEOBENCH's `BROWSER.APP`, open **Settings → Proxy** and enter
+  `host:port`, for example `192.168.1.10:5001`;
 - in SymZilla, choose **Edit → Options...**, then enter `192.168.1.10:5001` or
   the full URL in **Network / GB proxy**.
 
@@ -85,7 +86,7 @@ The `geobench` preset:
 - keeps plain-HTTP link destinations readable when they fit the browser's
   47-character link buffer;
 - rewrites HTTPS and longer links, forms, and images to short proxy-local tokens;
-- downloads and converts images lazily;
+- exposes lazy GBPC image resources to legacy HTML-mode Browser builds;
 - bounds images to 160x96 pixels;
 - emits GBPC v2 `.PIC` data, defaulting to canonical four-colour Mode 1;
 - transliterates displayed text to printable 7-bit ASCII;
@@ -102,6 +103,31 @@ Mode-7 images with the GEOBENCH MSX palette and two pixels per byte. A Mode-6
 client can send `X-GBPC: 1` or omit the header; absent, malformed, and unknown
 offers safely retain the byte-compatible Mode-1 output. `X-GBPC` is consumed by
 the proxy and is not forwarded to upstream websites.
+
+Newer GEOBENCH Browser builds can request the bounded DOX/PIC representation
+used by the modular document renderer:
+
+```http
+X-GB-DOX: geobench-1
+X-GBPC: 1
+```
+
+The MIME `Accept: application/x-symbos-dox` header is optional when the
+explicit GEOBENCH profile is present, which keeps the 8-bit request inside its
+256-byte buffer. MSX Screen 7 requests `X-GBPC: 7,1` instead. This profile
+preserves DOX paragraph, link, form, and two-to-four-column table records. Its
+`GRPH` entries contain compact proxy-local image references; Browser fetches and
+converts each picture only when it becomes visible, then retains it in a bounded
+current-page cache. Scrolling can therefore redraw cached pictures without
+another request. Lazy resources preserve their table-specific resize bounds,
+which reduces first-load transfer size while avoiding SymZilla's eager
+embedded-graphics allocation or a small page-level image cap. The default
+complete response is limited to 16 KiB, with
+at most 4 KiB of TEXT, 16 links, 127 byte-addressable graphic references, 8
+controls, 24 table rows, and 96 table cells. Unsupported or irregular tables
+are reduced to readable source-order text. Responses vary on `Accept`,
+`X-GB-DOX`, and the selected image capability header, so one GB-proxy instance
+can serve both GEOBENCH and SymZilla.
 
 ## Remote Markdown
 

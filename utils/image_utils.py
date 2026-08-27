@@ -423,6 +423,32 @@ def encode_gbpc(image, dithering="FLOYDSTEINBERG", mode=GBPC_MODE_1):
 		)
 	palette = GBPC_MODE7_PALETTE if mode == GBPC_MODE_7 else GBPC_PALETTE
 	pens = _quantize_gbpc(image, dithering, palette)
+	return encode_gbpc_pixels(pens, mode=mode)
+
+
+def encode_gbpc_pixels(pens, mode=GBPC_MODE_1):
+	"""Encode palette-index rows as a complete portable GBPC v2 picture."""
+	_gbpc_codec_identity(mode)
+	if not pens or not pens[0]:
+		raise ValueError("Cannot encode an empty GBPC image")
+	height = len(pens)
+	width = len(pens[0])
+	if width > 0xFFFF or height > 0xFFFF:
+		raise ValueError("GBPC dimensions exceed the v2 header limits")
+	if width % 4:
+		raise ValueError("GBPC image width must be a multiple of four")
+	if mode == GBPC_MODE_7 and (
+		width > _GBPC_MODE7_MAX_WIDTH or height > _GBPC_MODE7_MAX_HEIGHT
+	):
+		raise ValueError(
+			"GBPC Mode-7 dimensions exceed the GEOBENCH 512x255 limit"
+		)
+	max_pen = 15 if mode == GBPC_MODE_7 else 3
+	for row in pens:
+		if len(row) != width:
+			raise ValueError("GBPC rows must all have the same width")
+		if any(not isinstance(pen, int) or pen < 0 or pen > max_pen for pen in row):
+			raise ValueError(f"GBPC mode {mode} palette indexes must be 0-{max_pen}")
 	header = b"GBPC" + bytes((2, mode)) + struct.pack("<HH", width, height) + GBPC_INKS
 	bitmap = _pack_gbpc_mode7(pens) if mode == GBPC_MODE_7 else _pack_gbpc(pens)
 	return header + bitmap
@@ -529,6 +555,43 @@ def convert_to_sgx(
 		image, max_width, max_height, width_multiple=width_multiple
 	)
 	return encode_sgx(image, dithering=dithering, mode=mode, colours=colours)
+
+
+def convert_to_gbpc(
+	image_data,
+	*,
+	mode=GBPC_MODE_1,
+	max_width=160,
+	max_height=96,
+	dithering="FLOYDSTEINBERG",
+	max_image_pixels=16 * 1024 * 1024,
+	svg_timeout=_SVG_CONVERSION_TIMEOUT,
+	max_intermediate_bytes=None,
+):
+	"""Decode, bound, resize, and encode untrusted image bytes as GBPC v2."""
+	_gbpc_codec_identity(mode)
+	max_width = int(max_width)
+	max_height = int(max_height)
+	if mode == GBPC_MODE_7:
+		max_width = min(_GBPC_MODE7_MAX_WIDTH, max_width)
+		max_height = min(_GBPC_MODE7_MAX_HEIGHT, max_height)
+	if min(max_width, max_height, max_image_pixels) < 1:
+		raise ValueError("GBPC image and pixel limits must be positive")
+	if max_intermediate_bytes is None:
+		max_intermediate_bytes = max(1024 * 1024, max_image_pixels * 5)
+	image = _open_image(
+		image_data,
+		resize=True,
+		max_width=max_width,
+		max_height=max_height,
+		max_image_pixels=max_image_pixels,
+		svg_timeout=svg_timeout,
+		max_intermediate_bytes=max_intermediate_bytes,
+	)
+	if image.width * image.height > max_image_pixels:
+		raise ValueError(f"Decoded image exceeds the {max_image_pixels}-pixel limit")
+	image = _resize_to_fit(_as_rgb(image), max_width, max_height, width_multiple=4)
+	return encode_gbpc(image, dithering=dithering, mode=mode)
 
 
 def _as_rgb(image):

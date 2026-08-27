@@ -6,6 +6,7 @@ from PIL import Image
 
 from utils.dox_utils import (
 	DoxLimits,
+	GbpcProfile,
 	DoxValidationError,
 	SgxProfile,
 	build_dox_from_html,
@@ -13,12 +14,27 @@ from utils.dox_utils import (
 	parse_sgx_profile,
 	validate_dox,
 )
-from utils.image_utils import SGX_MODE_0, SGX_MODE_5, SYMBOS_PALETTE
+from utils.image_utils import (
+	GBPC_MODE7_PALETTE,
+	GBPC_PALETTE,
+	SGX_MODE_0,
+	SGX_MODE_5,
+	SYMBOS_PALETTE,
+)
 
 
 def _png(indexes, width, height=1):
 	image = Image.new("RGB", (width, height))
 	image.putdata([SYMBOS_PALETTE[index] for index in indexes])
+	output = io.BytesIO()
+	image.save(output, format="PNG")
+	return output.getvalue()
+
+
+def _gbpc_png(indexes, width, height=1, *, mode=1):
+	image = Image.new("RGB", (width, height))
+	palette = GBPC_MODE7_PALETTE if mode == 7 else GBPC_PALETTE
+	image.putdata([palette[index] for index in indexes])
 	output = io.BytesIO()
 	image.save(output, format="PNG")
 	return output.getvalue()
@@ -110,6 +126,84 @@ class SgxProfileTests(unittest.TestCase):
 
 
 class DoxSerializationTests(unittest.TestCase):
+	def test_geobench_four_colour_image_has_exact_embedded_gbpc_vector(self):
+		profile = GbpcProfile(1)
+		document = build_dox_from_image(
+			_gbpc_png((0, 1, 2, 3, 3, 2, 1, 0), 8),
+			"http://example.com/four.png",
+			profile=profile,
+			dithering="none",
+		)
+
+		self.assertEqual(
+			_serialized_chunk(document, b"GRPH"),
+			bytes.fromhex(
+				"475250481300000001100047425043020108000100011a000653ac"
+			),
+		)
+		validate_dox(document, profile=profile)
+
+	def test_geobench_sixteen_colour_image_has_exact_embedded_gbpc_vector(self):
+		profile = GbpcProfile(7)
+		document = build_dox_from_image(
+			_gbpc_png((0, 5, 10, 15), 4, mode=7),
+			"http://example.com/sixteen.png",
+			profile=profile,
+			dithering="none",
+		)
+
+		self.assertEqual(
+			_serialized_chunk(document, b"GRPH"),
+			bytes.fromhex(
+				"475250481300000001100047425043020704000100011a000605af"
+			),
+		)
+		validate_dox(document, profile=profile)
+
+	def test_gbpc_graphics_require_explicit_geobench_profile(self):
+		document = build_dox_from_image(
+			_gbpc_png((0, 1, 2, 3), 4),
+			"http://example.com/four.png",
+			profile=GbpcProfile(1),
+			dithering="none",
+		)
+
+		with self.assertRaises(DoxValidationError):
+			validate_dox(document)
+
+	def test_geobench_profile_serializes_lazy_image_url_records(self):
+		profile = GbpcProfile(1)
+		document = build_dox_from_html(
+			'<img src="/one.png"><img src="/two.png">',
+			"http://example.com/",
+			profile=profile,
+			image_shortener=lambda target, _content, _width, _height: (
+				"http://proxy/i/" + target.rsplit("/", 1)[-1] + ".pic"
+			),
+		)
+		records = _counted_records(validate_dox(document, profile=profile)[b"GRPH"])
+
+		self.assertEqual(records, [
+			b"\x01http://proxy/i/one.png.pic\x00",
+			b"\x01http://proxy/i/two.png.pic\x00",
+		])
+
+	def test_geobench_profile_rejects_non_http_image_reference(self):
+		profile = GbpcProfile(1)
+		document = build_dox_from_html(
+			'<img src="/one.png">',
+			"http://example.com/",
+			profile=profile,
+			image_shortener=lambda _target, _content, _width, _height: (
+				"http://proxy/i/one.pic"
+			),
+		)
+		bad = b"\x01https://proxy/i/one.pic\x00"
+		payload = b"\x01" + struct.pack("<H", len(bad)) + bad
+
+		with self.assertRaises(DoxValidationError):
+			validate_dox(_replace_chunk(document, b"GRPH", payload), profile=profile)
+
 	def test_four_colour_image_has_exact_extended_grph_vector(self):
 		document = build_dox_from_image(
 			_png((0, 1, 2, 3, 3, 2, 1, 0), 8),

@@ -68,6 +68,22 @@ MAX_DOX_IMAGE_WIDTH = 160
 MAX_DOX_IMAGE_HEIGHT = 96
 MAX_DOX_URL_BYTES = 127
 
+# GEOBENCH BROWSER.APP negotiates a smaller one-bank DOX/PIC profile. These
+# bounds are independent of the larger SymZilla defaults above.
+MAX_GEOBENCH_DOX_TEXT_BYTES = 4096
+MAX_GEOBENCH_DOX_LINKS = 16
+# Graphic records are compact lazy references for GEOBENCH. The byte-sized DOX
+# record identifier, not image RAM, sets this format-level ceiling.
+MAX_GEOBENCH_DOX_GRAPHICS = 127
+MAX_GEOBENCH_DOX_GRAPHICS_BYTES = 8 * 1024
+MAX_GEOBENCH_DOX_CONTROLS = 8
+MAX_GEOBENCH_DOX_CONTROL_BYTES = 512
+MAX_GEOBENCH_DOX_DOCUMENT_BYTES = 16 * 1024
+MAX_GEOBENCH_DOX_URL_BYTES = 47
+MAX_GEOBENCH_DOX_TABLE_COLUMNS = 4
+MAX_GEOBENCH_DOX_TABLE_ROWS = 24
+MAX_GEOBENCH_DOX_TABLE_CELLS = 96
+
 # While SIMPLIFY_HTML is True, you can use WHITELISTED_DOMAINS to disable post-processing for
 # specific sites (only perform HTTPS -> HTTP conversion and character conversion (if CONVERT_CHARACTERS is True),
 # without otherwise modifying the page's source code).

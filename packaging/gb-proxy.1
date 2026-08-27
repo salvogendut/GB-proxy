@@ -20,10 +20,16 @@ on Debian
 before exposing it to a trusted LAN.  The proxy is not intended to be exposed
 directly to the public Internet.
 .SH CLIENT SUPPORT
-GEOBENCH uses the
+Current GEOBENCH builds use the
 .B geobench
-preset to receive simplified HTML and GBPC images in
+preset and negotiate bounded DOX documents whose images are compact lazy
+proxy references fetched as GBPC only when visible in
 .BR BROWSER.APP .
+Current Browser builds retain those converted pictures in a bounded page cache,
+so scrolling does not normally request them again.  Image references preserve
+their table-specific resize bounds to reduce transfer and conversion cost.
+Older Browser builds continue to receive simplified HTML and lazy GBPC image
+resources from the same proxy.
 .PP
 SymZilla on SymbOS selects bounded DOX documents and SGX images per request; it
 does not require a separate preset.  It requires SymbOS 3 or newer, a
@@ -43,8 +49,8 @@ up to its 47-character link limit.  Longer links, GEOBENCH HTTPS links, and form
 actions use compact proxy-local tokens; those tokens remain visible in clients
 which do not keep a separate display URL.
 .PP
-SymZilla renders simple rectangular tables with two to four columns as framed
-DOX grids.  Cells may contain text, inline links, and remote images.  Table
+GEOBENCH and SymZilla render simple rectangular tables with two to four columns
+as framed DOX grids.  Cells may contain text, inline links, and remote images.  Table
 images are resized to a conservative per-column width so they remain inside
 their cells at the document's minimum render width; linked images remain
 directly clickable.  A centered image-only HTML table with consistent, bounded

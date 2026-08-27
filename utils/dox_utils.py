@@ -13,9 +13,13 @@ from urllib.parse import unquote_to_bytes, urlencode, urljoin, urlparse
 from bs4 import BeautifulSoup, Comment, Doctype, NavigableString, Tag
 
 from utils.image_utils import (
+	GBPC_MODE_1,
+	GBPC_MODE_7,
 	SGX_MODE_0,
 	SGX_MODE_5,
+	convert_to_gbpc,
 	convert_to_sgx,
+	encode_gbpc_pixels,
 	encode_sgx_pixels,
 )
 
@@ -65,6 +69,7 @@ _TABLE_COLUMN_HEADER_BYTES = 14
 _TABLE_CELL_STYLE = b"\x33\x23\x13"
 _TABLE_CELL_HORIZONTAL_OVERHEAD = 5
 _TABLE_CENTER_FORMAT = b"\x09\x01\x03\x01"
+_GEOBENCH_EXTERNAL_GRAPHIC = 1
 
 
 class DoxError(ValueError):
@@ -96,6 +101,21 @@ class SgxProfile:
 
 
 SAFE_SGX_PROFILE = SgxProfile()
+
+
+@dataclass(frozen=True)
+class GbpcProfile:
+	"""The GBPC v2 graphic codec requested by GEOBENCH BROWSER.APP."""
+
+	mode: int = GBPC_MODE_1
+
+	def __post_init__(self):
+		if self.mode not in (GBPC_MODE_1, GBPC_MODE_7):
+			raise ValueError("Unsupported GBPC DOX profile")
+
+	@property
+	def header_value(self):
+		return str(self.mode)
 
 
 def parse_sgx_profile(value):
@@ -149,7 +169,7 @@ class DoxLimits:
 		if self.max_graphics > 127:
 			raise ValueError("SymZilla safely supports at most 127 graphics")
 		if self.max_graphics_bytes < 40:
-			raise ValueError("SymZilla graphics limit must fit its SGX5 link icon")
+			raise ValueError("DOX graphics limit must fit its link icon")
 		if not 8 <= self.max_image_width <= 248 or self.max_image_height > 255:
 			raise ValueError("SymZilla images must fit its byte-sized dimensions")
 		aligned_width = (self.max_image_width // 4) * 4
@@ -320,11 +340,9 @@ def _link_icon(profile):
 		(0, 0, 1, 1, 1, 0, 0, 0),
 		(0, 0, 0, 0, 0, 0, 0, 0),
 	)
-	return encode_sgx_pixels(
-		pixels,
-		mode=profile.mode,
-		colours=profile.colours,
-	)
+	if isinstance(profile, GbpcProfile):
+		return encode_gbpc_pixels(pixels, mode=profile.mode)
+	return encode_sgx_pixels(pixels, mode=profile.mode, colours=profile.colours)
 
 
 class _DoxBuilder:
@@ -335,6 +353,7 @@ class _DoxBuilder:
 		limits,
 		image_fetcher,
 		*,
+		image_shortener,
 		link_shortener,
 		dithering,
 		svg_timeout,
@@ -343,6 +362,7 @@ class _DoxBuilder:
 		self.profile = profile
 		self.limits = limits
 		self.image_fetcher = image_fetcher
+		self.image_shortener = image_shortener
 		self.link_shortener = link_shortener
 		self.dithering = dithering
 		self.svg_timeout = svg_timeout
@@ -522,6 +542,33 @@ class _DoxBuilder:
 			self.limits.max_image_height,
 			self._table_image_height or self.limits.max_image_height,
 		)
+		if isinstance(self.profile, GbpcProfile) and self.image_shortener is not None:
+			target = _absolute_http_url(self.base_url, source)
+			if content is None and str(source).startswith("data:"):
+				content = _data_uri(str(source), self.limits.max_image_source_bytes)
+				if content is not None:
+					target = (
+						self.base_url + "#inline-image-"
+						+ hashlib.sha256(content).hexdigest()
+					)
+			if target is None or (
+				content is not None and len(content) > self.limits.max_image_source_bytes
+			):
+				return self._image_fallback(alt)
+			try:
+				url = self.image_shortener(target, content, max_width, max_height)
+			except Exception as error:
+				LOGGER.warning("Could not shorten DOX image %s: %s", target, error)
+				return self._image_fallback(alt)
+			data = _direct_url_bytes(url, self.limits.max_url_bytes)
+			if data is None or not data.lower().startswith(b"http://"):
+				return self._image_fallback(alt)
+			graphic_id = self._add_graphic(
+				bytes((_GEOBENCH_EXTERNAL_GRAPHIC,)) + data + b"\x00"
+			)
+			if graphic_id is None:
+				return self._image_fallback(alt)
+			return self._insert_graphic(graphic_id, link_id)
 		source_key = None
 		if content is None:
 			if str(source).startswith("data:"):
@@ -577,17 +624,29 @@ class _DoxBuilder:
 			return self._image_fallback(alt)
 		self._image_conversions += 1
 		try:
-			graphic = convert_to_sgx(
-				content,
-				mode=self.profile.mode,
-				colours=self.profile.colours,
-				max_width=max_width,
-				max_height=max_height,
-				dithering=self.dithering,
-				max_image_pixels=self.limits.max_image_pixels,
-				svg_timeout=self.svg_timeout,
-				max_intermediate_bytes=self.limits.max_image_source_bytes,
-			)
+			if isinstance(self.profile, GbpcProfile):
+				graphic = convert_to_gbpc(
+					content,
+					mode=self.profile.mode,
+					max_width=max_width,
+					max_height=max_height,
+					dithering=self.dithering,
+					max_image_pixels=self.limits.max_image_pixels,
+					svg_timeout=self.svg_timeout,
+					max_intermediate_bytes=self.limits.max_image_source_bytes,
+				)
+			else:
+				graphic = convert_to_sgx(
+					content,
+					mode=self.profile.mode,
+					colours=self.profile.colours,
+					max_width=max_width,
+					max_height=max_height,
+					dithering=self.dithering,
+					max_image_pixels=self.limits.max_image_pixels,
+					svg_timeout=self.svg_timeout,
+					max_intermediate_bytes=self.limits.max_image_source_bytes,
+				)
 		except Exception as error:
 			LOGGER.warning("Could not convert DOX image %s: %s", source_key, error)
 			graphic = None
@@ -1296,7 +1355,7 @@ class _DoxBuilder:
 		document = b"".join(chunks)
 		if len(document) > self.limits.max_document_bytes:
 			raise DoxError("DOX document exceeds its configured size limit")
-		validate_dox(document, limits=self.limits)
+		validate_dox(document, limits=self.limits, profile=self.profile)
 		return document
 
 
@@ -1307,6 +1366,7 @@ def build_dox_from_html(
 	profile=SAFE_SGX_PROFILE,
 	limits=None,
 	image_fetcher=None,
+	image_shortener=None,
 	link_shortener=None,
 	dithering="FLOYDSTEINBERG",
 	svg_timeout=10,
@@ -1318,6 +1378,7 @@ def build_dox_from_html(
 		profile,
 		limits,
 		image_fetcher,
+		image_shortener=image_shortener,
 		link_shortener=link_shortener,
 		dithering=dithering,
 		svg_timeout=svg_timeout,
@@ -1332,6 +1393,7 @@ def build_dox_from_image(
 	*,
 	profile=SAFE_SGX_PROFILE,
 	limits=None,
+	image_shortener=None,
 	dithering="FLOYDSTEINBERG",
 	svg_timeout=10,
 ):
@@ -1342,6 +1404,7 @@ def build_dox_from_image(
 		profile,
 		limits,
 		None,
+		image_shortener=image_shortener,
 		link_shortener=None,
 		dithering=dithering,
 		svg_timeout=svg_timeout,
@@ -1617,9 +1680,10 @@ def _validate_ctrl(payload, links, marker_ids, limits):
 		raise DoxValidationError("TEXT CTRL markers do not match the CTRL records")
 
 
-def validate_dox(document, *, limits=None):
+def validate_dox(document, *, limits=None, profile=None):
 	"""Validate and return parsed chunks for GB-proxy's supported DOX subset."""
 	limits = limits or DoxLimits()
+	profile = profile or SAFE_SGX_PROFILE
 	chunks = _parse_chunks(document, limits.max_document_bytes)
 	if not chunks[b"INFO"] or len(chunks[b"INFO"]) > 255 or b"\x00" not in chunks[b"INFO"]:
 		raise DoxValidationError("Invalid INFO chunk")
@@ -1644,19 +1708,49 @@ def validate_dox(document, *, limits=None):
 	)
 	graphics_bytes = 0
 	for graphic in graphics:
-		if len(graphic) < 8 or graphic[0] != 0x40 or graphic[1] not in (0, 5):
-			raise DoxValidationError("Invalid extended SGX graphic")
-		width_bytes, width, height = struct.unpack_from("<HHH", graphic, 2)
-		multiple = 8 if graphic[1] == 0 else 4
-		expected_width_bytes = width // (4 if graphic[1] == 0 else 2)
-		if (
-			width < 1 or height < 1 or width > 255 or height > 255
-			or width % multiple or width_bytes != expected_width_bytes
-			or width_bytes % 2
-			or len(graphic) != 8 + width_bytes * height
-			or len(graphic) > DOX_MAX_GRAPHIC_ENTRY_BYTES
-		):
-			raise DoxValidationError("Invalid SGX dimensions or payload length")
+		if isinstance(profile, GbpcProfile):
+			if graphic[:1] == bytes((_GEOBENCH_EXTERNAL_GRAPHIC,)):
+				if (
+					len(graphic) < 10
+					or graphic[-1] != 0
+					or _direct_url_bytes(
+						graphic[1:-1].decode("ascii", errors="ignore"),
+						limits.max_url_bytes,
+					) != graphic[1:-1]
+					or not graphic[1:-1].lower().startswith(b"http://")
+				):
+					raise DoxValidationError("Invalid external GEOBENCH graphic URL")
+				graphics_bytes += len(graphic)
+				continue
+			if len(graphic) < 14 or graphic[:4] != b"GBPC" or graphic[4] != 2:
+				raise DoxValidationError("Invalid GEOBENCH graphic record")
+			mode = graphic[5]
+			width, height = struct.unpack_from("<HH", graphic, 6)
+			if mode != profile.mode:
+				raise DoxValidationError("GBPC graphic does not match the requested mode")
+			row_bytes = width // (4 if mode == GBPC_MODE_1 else 2)
+			if (
+				mode not in (GBPC_MODE_1, GBPC_MODE_7)
+				or width < 1 or height < 1 or width % 4
+				or width > limits.max_image_width or height > limits.max_image_height
+				or len(graphic) != 14 + row_bytes * height
+				or len(graphic) > DOX_MAX_GRAPHIC_ENTRY_BYTES
+			):
+				raise DoxValidationError("Invalid GBPC dimensions or payload length")
+		else:
+			if len(graphic) < 8 or graphic[0] != 0x40 or graphic[1] not in (0, 5):
+				raise DoxValidationError("Invalid extended SGX graphic")
+			width_bytes, width, height = struct.unpack_from("<HHH", graphic, 2)
+			multiple = 8 if graphic[1] == 0 else 4
+			expected_width_bytes = width // (4 if graphic[1] == 0 else 2)
+			if (
+				width < 1 or height < 1 or width > 255 or height > 255
+				or width % multiple or width_bytes != expected_width_bytes
+				or width_bytes % 2
+				or len(graphic) != 8 + width_bytes * height
+				or len(graphic) > DOX_MAX_GRAPHIC_ENTRY_BYTES
+			):
+				raise DoxValidationError("Invalid SGX dimensions or payload length")
 		graphics_bytes += len(graphic)
 	if graphics_bytes > limits.max_graphics_bytes:
 		raise DoxValidationError("Graphics exceed their aggregate size limit")

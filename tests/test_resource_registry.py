@@ -39,6 +39,21 @@ class ResourceRegistryTests(unittest.TestCase):
 		with self.assertRaises(ValueError):
 			register_resource("image", "inline-image:test", b"four")
 
+	def test_image_resize_bounds_are_part_of_the_resource_identity(self):
+		first = register_resource(
+			"image", "https://example.com/image.png", max_width=120, max_height=80
+		)
+		same = register_resource(
+			"image", "https://example.com/image.png", max_width=120, max_height=80
+		)
+		smaller = register_resource(
+			"image", "https://example.com/image.png", max_width=64, max_height=48
+		)
+
+		self.assertEqual(first, same)
+		self.assertNotEqual(first, smaller)
+		self.assertEqual(resolve_resource("image", first).max_width, 120)
+
 
 if __name__ == "__main__":
 	unittest.main()

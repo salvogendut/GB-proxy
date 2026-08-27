@@ -16,8 +16,8 @@ from PIL import Image
 
 from gb_proxy.application import create_app, domain_matches
 from tests.config_stub import install_config
-from utils.dox_utils import DOX_MIMETYPE, validate_dox
-from utils.image_utils import SYMBOS_PALETTE
+from utils.dox_utils import DOX_MIMETYPE, GbpcProfile, validate_dox
+from utils.image_utils import GBPC_MODE7_PALETTE, SYMBOS_PALETTE
 from utils.markdown_utils import MarkdownSafetyError
 from utils.resource_registry import resolve_resource
 from utils.system_utils import ConfigurationError
@@ -560,9 +560,9 @@ class MarkdownApplicationTests(unittest.TestCase):
 
 class SymzillaDoxApplicationTests(unittest.TestCase):
 	@staticmethod
-	def _png(indexes, width, height=1):
+	def _png(indexes, width, height=1, palette=SYMBOS_PALETTE):
 		image = Image.new("RGB", (width, height))
-		image.putdata([SYMBOS_PALETTE[index] for index in indexes])
+		image.putdata([palette[index] for index in indexes])
 		output = io.BytesIO()
 		image.save(output, format="PNG")
 		return output.getvalue()
@@ -687,7 +687,7 @@ class SymzillaDoxApplicationTests(unittest.TestCase):
 		self.assertEqual(response.status_code, 200)
 		self.assertEqual(response.content_type, DOX_MIMETYPE)
 		self.assertEqual(int(response.headers["Content-Length"]), len(response.data))
-		self.assertEqual(response.headers["Vary"], "Accept, X-GB-SGX")
+		self.assertEqual(response.headers["Vary"], "Accept, X-GB-DOX, X-GB-SGX")
 		self.assertEqual(response.headers["Content-Disposition"], 'inline; filename="document.dox"')
 		self.assertIn(b"Hello", validate_dox(response.data)[b"TEXT"])
 		self.assertNotIn(DOX_MIMETYPE, calls[0][2]["headers"]["Accept"])
@@ -742,6 +742,56 @@ class SymzillaDoxApplicationTests(unittest.TestCase):
 		graphics = validate_dox(response.data)[b"GRPH"]
 
 		self.assertEqual(graphics[3:], bytes.fromhex("400002000800010053ac"))
+
+	def test_geobench_dox_profile_defers_requested_mode7_image(self):
+		upstream = SimpleNamespace(
+			content=self._png((0, 5, 10, 15), 4, palette=GBPC_MODE7_PALETTE),
+			status_code=200,
+			headers={"Content-Type": "image/png"},
+			url="http://example.com/image.png",
+		)
+		response, calls = self._request(upstream, headers={
+			"Accept": DOX_MIMETYPE,
+			"X-GB-DOX": "geobench-1",
+			"X-GBPC": "7,1",
+		})
+		chunks = validate_dox(response.data, profile=GbpcProfile(7))
+		graphics = chunks[b"GRPH"]
+		entry_length = struct.unpack_from("<H", graphics, 1)[0]
+		entry = graphics[3:3 + entry_length]
+
+		self.assertTrue(entry.startswith(b"\x01http://127.0.0.1:5001/i/"))
+		self.assertTrue(entry.endswith(b".pic\x00"))
+		token = entry.rsplit(b"/", 1)[1][:-5].decode("ascii")
+		resource = resolve_resource("image", token)
+		self.assertEqual(resource.target, "http://example.com/image.png")
+		self.assertEqual(resource.content, upstream.content)
+		self.assertEqual((resource.max_width, resource.max_height), (160, 96))
+		self.assertEqual(response.headers["Vary"], "Accept, X-GB-DOX, X-GBPC")
+		self.assertLessEqual(len(response.data), 16 * 1024)
+		self.assertNotIn("X-GB-DOX", calls[0][2]["headers"])
+		self.assertNotIn("X-GBPC", calls[0][2]["headers"])
+
+	def test_geobench_dox_profile_keeps_bounded_table_layout(self):
+		upstream = SimpleNamespace(
+			content=(
+				b"<html><body><table><tr><th>Game</th><th>Code</th></tr>"
+				b"<tr><td><a href='/one'>One</a></td><td>1234</td></tr>"
+				b"<tr><td>Two</td><td>5678</td></tr></table></body></html>"
+			),
+			status_code=200,
+			headers={"Content-Type": "text/html"},
+			url="http://retrocheats.neocities.org/",
+		)
+		response, _ = self._request(upstream, headers={
+			"X-GB-DOX": "geobench-1",
+			"X-GBPC": "1",
+		})
+		chunks = validate_dox(response.data, profile=GbpcProfile(1))
+
+		self.assertEqual(chunks[b"TEXT"].count(b"\xff\x12"), 3)
+		self.assertEqual(chunks[b"LINK"][0], 1)
+		self.assertLessEqual(len(response.data), 16 * 1024)
 
 	def test_html_images_are_fetched_eagerly_without_symzilla_accept_header(self):
 		image = self._png((0, 1, 0, 1, 1, 0, 1, 0), 8)
@@ -830,6 +880,54 @@ class SymzillaDoxApplicationTests(unittest.TestCase):
 				for identity in range(6)
 			],
 		)
+
+	def test_geobench_table_keeps_all_six_images_as_lazy_resources(self):
+		html = (
+			"<html><body><center><table width='384'>" + "".join(
+			"<tr>" + "".join(
+				f"<td width='128' align='center'><a href='/{identity}'>"
+				f"<img src='/{identity}.png' width='120' height='80' alt='{identity}'>"
+				"</a></td>"
+				for identity in range(row * 3, row * 3 + 3)
+			) + "</tr>"
+			for row in range(2)
+		) + "</table></center></body></html>"
+		)
+		upstream = SimpleNamespace(
+			content=html.encode("ascii"),
+			status_code=200,
+			headers={"Content-Type": "text/html"},
+			url="http://retrocheats.neocities.org/",
+		)
+
+		response, calls = self._request(upstream, headers={
+			"X-GB-DOX": "geobench-1",
+			"X-GBPC": "1",
+		})
+		chunks = validate_dox(response.data, profile=GbpcProfile(1))
+		graphics = chunks[b"GRPH"]
+		count = graphics[0]
+		lengths = struct.unpack_from(f"<{count}H", graphics, 1)
+		offset = 1 + count * 2
+		records = []
+		for length in lengths:
+			records.append(graphics[offset:offset + length])
+			offset += length
+
+		self.assertEqual(count, 7)
+		self.assertEqual(len(calls), 1)
+		self.assertEqual(chunks[b"TEXT"].count(b"\xff\x13"), 2)
+		for identity, record in enumerate(records[1:]):
+			self.assertTrue(record.startswith(b"\x01http://127.0.0.1:5001/i/"))
+			self.assertTrue(record.endswith(b".pic\x00"))
+			token = record.rsplit(b"/", 1)[1][:-5].decode("ascii")
+			resource = resolve_resource("image", token)
+			self.assertEqual(
+				resource.target,
+				f"http://retrocheats.neocities.org/{identity}.png",
+			)
+			self.assertIsNone(resource.content)
+			self.assertEqual((resource.max_width, resource.max_height), (120, 80))
 
 	def test_q_zero_dox_accept_keeps_existing_html_behavior(self):
 		upstream = SimpleNamespace(
@@ -933,7 +1031,7 @@ class SymzillaDoxApplicationTests(unittest.TestCase):
 		self.assertEqual(response.status_code, 504)
 		self.assertEqual(response.content_type, DOX_MIMETYPE)
 		self.assertIn(b"Upstream timeout", text)
-		self.assertEqual(response.headers["Vary"], "Accept, X-GB-SGX")
+		self.assertEqual(response.headers["Vary"], "Accept, X-GB-DOX, X-GB-SGX")
 
 	def test_body_forbidden_upstream_status_is_normalized_for_dox(self):
 		for status in (101, 204, 205, 304):
